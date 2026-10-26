@@ -1,0 +1,23 @@
+# 通信往復時間の実測用 (設計手順 2)。objects は最小、in ビット/ワードを自動で変化させる。
+# 実機の IP / type に変えて起動し、ヘッダの「周期 / ジッタ / 読/計算/書」を見る。
+#   python -m twin configs/commtest.yaml
+title: Comm Test
+plc:
+  type: mock            # keyence / melsec に変更
+  ip: 192.168.0.10
+  port: 8501
+  out: {dev: DM, addr: 1000, words: 64}
+  in:  {dev: DM, addr: 1100, words: 64}
+cycle_ms: 10
+tags:
+  out:
+    - {name: OUT_BIT0, bit: "0.0"}
+    - {name: OUT_W0, word: 1}
+  in:
+    - {name: BLINK_1S, bit: "0.0", comment: 1秒周期で反転}
+    - {name: BLINK_100MS, bit: "0.1", comment: 100ms周期で反転}
+    - {name: CYCLE_COUNTER, word: 1, comment: 毎周期 +1}
+objects:
+  - {name: blink1, type: blinker, output: in.BLINK_1S, period: 1.0}
+  - {name: blink2, type: blinker, output: in.BLINK_100MS, period: 0.1}
+  - {name: cnt, type: counter, output: in.CYCLE_COUNTER}

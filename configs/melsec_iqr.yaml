@@ -1,0 +1,48 @@
+# 三菱 MELSEC iQ-R (SLMP 3Eフレーム・バイナリ・TCP)
+#   python -m twin configs/melsec_iqr.yaml
+# GX Works3: ユニットパラメータ > 外部機器構成 > "SLMP接続機器" を追加 (プロトコル TCP, ポート 5000 など)
+#            通信データコード = バイナリ
+# PLC 側: docs/plc_io_layer.md の I/O 層を入れ、TWIN_MODE (M0) を ON にする。
+title: iQ-R Line A
+plc:
+  type: melsec
+  ip: 192.168.3.39
+  port: 5000
+  timeout: 1.0
+  network: 0
+  station: 255                           # 0xFF = 自局
+  out: {dev: D, addr: 1000, words: 64}   # PLC -> PC
+  in:  {dev: D, addr: 1100, words: 64}   # PC -> PLC
+cycle_ms: 10
+record_seconds: 300
+
+watch:
+  - {dev: D, addr: 0, words: 8}
+  - {dev: M, addr: 0, words: 2}          # M0〜M31 (先頭は16の倍数)
+  - {dev: SD, addr: 520, words: 2, names: [SCAN_CUR_ms, SCAN_CUR_us]}
+watch_every: 10
+
+tags:
+  out:
+    - {name: CONV1_RUN,  bit: "0.0", comment: Y0 相当}
+    - {name: CYL1_EXT,   bit: "0.1", comment: Y1 相当}
+    - {name: ST1_UP,     bit: "0.2"}
+    - {name: AX1_START,  bit: "0.3"}
+    - {name: AX1_TARGET, word: 10, type: s32}
+  in:
+    - {name: CYL1_END,   bit: "0.0", comment: X0 相当}
+    - {name: CYL1_HOME,  bit: "0.1", comment: X1 相当}
+    - {name: PE1,        bit: "0.2", comment: X2 相当}
+    - {name: AX1_BUSY,   bit: "0.4"}
+    - {name: AX1_INPOS,  bit: "0.5"}
+    - {name: AX1_POS,    word: 10, type: s32}
+
+objects:
+  - {name: conv1, type: conveyor, run: out.CONV1_RUN, length: 2000, speed: 300}
+  - {name: supply, type: emitter, onto: conv1, every: 3.0, length: 60}
+  - {name: PE1, type: sensor, on: conv1, at: 1500, output: in.PE1}
+  - {name: ST1, type: stopper, on: conv1, at: 1560, up: out.ST1_UP}
+  - {name: CYL1, type: cylinder, extend: out.CYL1_EXT, stroke: 100, time: 0.4,
+     end_sensor: in.CYL1_END, home_sensor: in.CYL1_HOME, push: {conv: conv1, at: 1520, to: null}}
+  - {name: AX1, type: axis, target: out.AX1_TARGET, start: out.AX1_START, speed: 400, accel: 0.3,
+     pos: in.AX1_POS, busy: in.AX1_BUSY, inpos: in.AX1_INPOS, unit_scale: 100}

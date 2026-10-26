@@ -1,0 +1,57 @@
+# デモ装置 (モックPLC)。実機なしで UI と挙動を確認する。
+#   python -m twin configs/demo_line.yaml
+# モックPLC側のラダー相当ロジック: twin/drivers/demo_logic.py
+title: Demo Line (mock PLC)
+plc:
+  type: mock
+  logic: twin.drivers.demo_logic
+  out: {dev: DM, addr: 1000, words: 64}   # PLC -> PC (仮想出力・監視数値)
+  in:  {dev: DM, addr: 1100, words: 64}   # PC -> PLC (仮想センサ・位置)
+cycle_ms: 10
+record_seconds: 120
+
+# 10周期(100ms)に1回読む追加監視デバイス
+watch:
+  - {dev: DM, addr: 100, words: 4, names: [TIMER_X10, COUNT_X7]}
+  - {dev: MR, addr: 100, words: 1}        # MR100..MR115 (ビット展開)
+watch_every: 10
+
+tags:
+  out:   # PLC -> PC
+    - {name: CONV1_RUN,  bit: "0.0", comment: 供給コンベヤ運転}
+    - {name: CYL1_EXT,   bit: "0.1", comment: 押出しシリンダ伸び}
+    - {name: ST1_UP,     bit: "0.2", comment: ストッパ上昇}
+    - {name: CONV2_RUN,  bit: "0.3", comment: 搬出コンベヤ運転}
+    - {name: AX1_START,  bit: "0.4", comment: 軸1 位置決め起動}
+    - {name: AX1_TARGET, word: 10, type: s32, comment: 軸1 目標位置}
+    - {name: WORK_COUNT, word: 12, comment: 通過ワーク数}
+    - {name: REJECT_CNT, word: 13, comment: 排出数}
+    - {name: SEQ_STEP,   word: 14, comment: シーケンス ステップ}
+    - {name: SCAN_CNT,   word: 15, comment: スキャンカウンタ}
+    - {name: INV_HZ,     word: 16, comment: インバータ周波数 x0.01Hz}
+  in:    # PC -> PLC
+    - {name: CYL1_END,   bit: "0.0", comment: 押出し 伸端}
+    - {name: CYL1_HOME,  bit: "0.1", comment: 押出し 縮端}
+    - {name: PE1,        bit: "0.2", comment: 光電 供給側}
+    - {name: PE2,        bit: "0.3", comment: 光電 搬出側}
+    - {name: AX1_BUSY,   bit: "0.4", comment: 軸1 動作中}
+    - {name: AX1_INPOS,  bit: "0.5", comment: 軸1 インポジション}
+    - {name: ESTOP,      bit: "1.0", comment: 非常停止 (手動ON用)}
+    - {name: REJECT_ALL, bit: "1.1", comment: 全数排出モード (手動ON用)}
+    - {name: AX1_POS,    word: 10, type: s32, comment: 軸1 現在位置}
+    - {name: CONV1_ENC,  word: 20, type: u32, comment: 供給コンベヤ エンコーダ}
+
+objects:
+  - {name: conv1, type: conveyor, run: out.CONV1_RUN, length: 2000, next: conv2,
+     speed_ref: out.INV_HZ, rated_hz: 60, rated_speed: 300, accel: 0.5, decel: 0.3,
+     encoder: in.CONV1_ENC, pulses_per_mm: 10}
+  - {name: conv2, type: conveyor, run: out.CONV2_RUN, length: 1200, speed: 300}
+  - {name: supply, type: emitter, onto: conv1, every: 3.0, length: 60, max: 20, initial: 2}
+  - {name: PE1, type: sensor, on: conv1, at: 1500, width: 10, output: in.PE1, delay: 0.01}
+  - {name: ST1, type: stopper, on: conv1, at: 1560, up: out.ST1_UP, time: 0.1}
+  - {name: CYL1, type: cylinder, extend: out.CYL1_EXT, stroke: 100, time: 0.4, retract_time: 0.3,
+     end_sensor: in.CYL1_END, home_sensor: in.CYL1_HOME,
+     push: {conv: conv1, at: 1520, width: 100, to: null}}
+  - {name: PE2, type: sensor, on: conv2, at: 1000, width: 10, output: in.PE2}
+  - {name: AX1, type: axis, target: out.AX1_TARGET, start: out.AX1_START, speed: 400, accel: 0.3,
+     pos: in.AX1_POS, busy: in.AX1_BUSY, inpos: in.AX1_INPOS, lo: -10, hi: 600, unit_scale: 100}

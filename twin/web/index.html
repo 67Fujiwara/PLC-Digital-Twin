@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLC Digital Twin</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="hdr">
+  <div class="hl">
+    <span id="led" class="led"></span>
+    <span id="title">PLC Digital Twin</span>
+    <span id="plcinfo" class="dim"></span>
+    <span id="status" class="dim"></span>
+  </div>
+  <div class="hstats">
+    <div class="stat"><span class="k">周期</span><span class="v"><b id="s-period">-</b><i>ms</i></span></div>
+    <div class="stat"><span class="k">ジッタ avg/p99/max</span><span class="v"><b id="s-jit">-</b><i>ms</i></span></div>
+    <div class="stat"><span class="k">読/計算/書</span><span class="v"><b id="s-rw">-</b><i>ms</i></span></div>
+    <div class="stat"><span class="k">配信</span><span class="v"><b id="s-fps">-</b><i>fps</i></span></div>
+    <div class="stat"><span class="k">遅延</span><span class="v"><b id="s-lat">-</b><i>ms</i></span></div>
+    <div class="stat"><span class="k">記録</span><span class="v"><b id="s-rec">-</b><i>s</i></span></div>
+  </div>
+  <div class="hbtns">
+    <button id="b-pause" title="波形を一時停止 (Space)">⏸ 波形停止</button>
+    <select id="sel-win" title="波形の時間幅">
+      <option value="2">2s</option><option value="5">5s</option><option value="10" selected>10s</option>
+      <option value="30">30s</option><option value="60">60s</option><option value="120">120s</option>
+    </select>
+    <button id="b-release" title="ブラウザからの強制をすべて解除">強制解除</button>
+    <button id="b-simreset" title="シミュレーションを初期状態に戻す">Sim リセット</button>
+    <button id="b-simtoggle" title="挙動シミュレーションの実行/停止">Sim 停止</button>
+    <a id="b-csv" href="/api/record.csv" download title="記録バッファをCSVで保存">CSV 保存</a>
+  </div>
+</header>
+
+<main id="main">
+  <section id="col-dev" class="col">
+    <div class="panel" id="p-out">
+      <h2>PLC → PC <span class="sub" id="h-out"></span><span class="hint">クリックで波形に追加</span></h2>
+      <div class="bits" id="bits-out"></div>
+      <table class="words" id="words-out"></table>
+    </div>
+    <div class="panel" id="p-in">
+      <h2>PC → PLC <span class="sub" id="h-in"></span><span class="hint">スイッチで強制 ON/OFF</span></h2>
+      <div class="bits" id="bits-in"></div>
+      <table class="words" id="words-in"></table>
+    </div>
+    <div class="panel" id="p-watch">
+      <h2>監視デバイス <span class="sub" id="h-watch"></span></h2>
+      <div class="bits" id="bits-watch"></div>
+      <table class="words" id="words-watch"></table>
+    </div>
+    <div class="panel" id="p-raw">
+      <h2 class="toggle" id="h-raw">▸ 生データ (全ワード hex)</h2>
+      <div id="raw" class="hidden">
+        <div class="rawhead">OUT <span id="raw-out-addr"></span></div><div class="rawgrid" id="raw-out"></div>
+        <div class="rawhead">IN <span id="raw-in-addr"></span></div><div class="rawgrid" id="raw-in"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="col-view" class="col">
+    <div class="panel" id="p-line">
+      <h2>ライン <span class="sub" id="h-line"></span>
+        <span class="right" id="line-btns"></span></h2>
+      <canvas id="line"></canvas>
+    </div>
+    <div class="panel" id="p-wave">
+      <h2>波形 <span class="sub">10ms 分解能</span>
+        <span class="right"><button id="b-wave-clear" class="small">チャンネル全解除</button></span></h2>
+      <div id="wave-wrap"><canvas id="wave"></canvas><div id="wave-tip" class="hidden"></div></div>
+    </div>
+  </section>
+
+  <section id="col-log" class="col">
+    <div class="panel" id="p-ev">
+      <h2>イベント <span class="sub" id="h-ev"></span>
+        <span class="right">
+          <label><input type="checkbox" id="ev-words"> 数値変化も</label>
+          <input id="ev-filter" placeholder="絞込み">
+          <button id="b-ev-clear" class="small">消去</button>
+        </span></h2>
+      <div id="events"></div>
+    </div>
+    <div class="panel" id="p-log">
+      <h2>ログ</h2>
+      <div id="logs"></div>
+    </div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

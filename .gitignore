@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+records/
+node_modules/
+*.csv
+!configs/**/*.csv
+.venv/
