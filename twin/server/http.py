@@ -10,12 +10,12 @@ import asyncio
 import json
 import mimetypes
 import os
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Tuple
 from urllib.parse import urlsplit, parse_qs
 
 from .ws import accept_key, encode_frame, read_message, WSClosed, OP_TEXT
 
-Handler = Callable[["Request"], Awaitable[tuple[int, str, bytes]]]
+Handler = Callable[["Request"], Awaitable[Tuple[int, str, bytes]]]
 REASONS = {200: "OK", 204: "No Content", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed",
            500: "Internal Server Error", 101: "Switching Protocols"}
 
