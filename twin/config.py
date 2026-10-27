@@ -98,6 +98,8 @@ class TwinConfig:
     out: BlockSpec
     inp: BlockSpec
     cycle_ms: float
+    cycle_auto: bool          # True: 起動時に往復時間を実測して最速周期を決める
+    spin_ms: float            # 周期直前のスピン待ち時間 (精度 vs CPU)
     watch: list[WatchSpec]
     watch_words: int
     watch_every: int
@@ -127,6 +129,9 @@ class TwinConfig:
             "plc": {"type": self.plc_type, "ip": self.plc.get("ip", ""),
                     "port": self.plc.get("port", ""), "driver": self.plc.get("driver", "")},
             "cycle_ms": self.cycle_ms,
+            "cycle_auto": self.cycle_auto,
+            "parallel_rw": bool(self.plc.get("parallel_rw", False)),
+            "protocol": str(self.plc.get("protocol", "tcp")),
             "out": self.out.to_dict(),
             "in": self.inp.to_dict(),
             "watch": [asdict(w) for w in self.watch],
@@ -373,9 +378,11 @@ def parse_config(raw: dict) -> TwinConfig:
     default_dev = "D" if plc_type == "melsec" else "DM"
     out = _parse_block(plc.get("out"), default_dev, 1000)
     inp = _parse_block(plc.get("in"), default_dev, 1100)
-    cycle_ms = float(raw.get("cycle_ms", 10))
-    if cycle_ms < 1:
-        raise ValueError("cycle_ms は 1 以上にしてください")
+    cyc = raw.get("cycle_ms", 10)
+    cycle_auto = isinstance(cyc, str) and cyc.strip().lower() in ("auto", "max", "fastest", "最速")
+    cycle_ms = 10.0 if cycle_auto else float(cyc)
+    if cycle_ms < 0.5:
+        raise ValueError("cycle_ms は 0.5 以上 (または auto) にしてください")
 
     watch: list[WatchSpec] = []
     off = 0
@@ -424,7 +431,8 @@ def parse_config(raw: dict) -> TwinConfig:
             seen.add(t.name)
 
     cfg = TwinConfig(
-        plc_type=plc_type, plc=plc, out=out, inp=inp, cycle_ms=cycle_ms,
+        plc_type=plc_type, plc=plc, out=out, inp=inp, cycle_ms=cycle_ms, cycle_auto=cycle_auto,
+        spin_ms=float(raw.get("spin_ms", 1.5)),
         watch=watch, watch_words=watch_words, watch_every=max(1, watch_every),
         tags=tags, objects=[_normalize_keys(o) for o in (raw.get("objects") or [])],
         record_seconds=float(raw.get("record_seconds", 120)),

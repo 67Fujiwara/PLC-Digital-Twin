@@ -71,6 +71,12 @@ class MockPLC(Driver):
         self._connected = True
         self._last = time.perf_counter()
 
+    def clone(self) -> "MockPLC":
+        """並列 R/W 用: 同じメモリを共有する別インスタンス (ロジックは元だけが回す)。"""
+        c = MockPLC(None, self.scan_ms)
+        c.mem = self.mem
+        return c
+
     def close(self) -> None:
         self._connected = False
 

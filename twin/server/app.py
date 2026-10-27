@@ -41,7 +41,7 @@ class TwinApp:
         self.started = time.time()
         self.ws_frames = 0
 
-        self.ctx = mp.get_context("spawn") if os.name == "nt" else mp.get_context()
+        self.ctx = mp.get_context("spawn")   # fork はスレッドと相性が悪いので全 OS で spawn
         self.cmd_q = self.ctx.Queue()
         self.parent_conn, self.child_conn = self.ctx.Pipe(duplex=False)
         self.stop_event = self.ctx.Event()
@@ -68,7 +68,12 @@ class TwinApp:
                 break
             if msg.get("type") == "snap":
                 c = _compact(msg)
+                cyc = msg["stat"].get("cycle_ms")
                 with self.lock:
+                    if cyc and cyc != self.cfg.cycle_ms:          # 自動決定された周期に合わせて記録長を調整
+                        self.cfg.cycle_ms = cyc
+                        maxlen = int(self.cfg.record_seconds * 1000 / cyc) + 10
+                        self.ring = deque(self.ring, maxlen=maxlen)
                     self.ring.append(c)
                     self.latest = msg
             elif msg.get("type") == "log":

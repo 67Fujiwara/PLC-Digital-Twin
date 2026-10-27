@@ -18,11 +18,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
     ap.add_argument("--check", action="store_true", help="設定の検証のみ")
     ap.add_argument("--mock", action="store_true", help="PLC に接続せずモックで起動 (画面と設定の確認用)")
+    ap.add_argument("--cycle", help="周期 ms を上書き (数値 or auto=起動時に実測して最速にする)")
     args = ap.parse_args(argv)
 
     from .config import load_config
     try:
         cfg = load_config(args.config)
+        if args.cycle:
+            cfg.raw["cycle_ms"] = args.cycle if args.cycle.lower() == "auto" else float(args.cycle)
+            from .config import parse_config
+            cfg = parse_config(cfg.raw)
         if args.mock and cfg.plc_type != "mock":
             from .config import parse_config
             raw = dict(cfg.raw)

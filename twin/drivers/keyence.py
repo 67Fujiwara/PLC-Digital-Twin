@@ -1,4 +1,4 @@
-"""キーエンス KV-8000 / KV-7000 / KV-Nano 上位リンク通信 (Ethernet, ポート8501)。
+"""キーエンス KV-8000 / KV-7000 / KV-Nano 上位リンク通信 (Ethernet, TCP ポート 8501 / UDP ポート 8500)。
 
 コマンド (ASCII, CR終端):
   RDS <dev><no>.U <count>\\r              連続読出し  -> "v v v ...\\r\\n"
@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from .base import TcpDriver, DriverError
+from .base import NetDriver, DriverError
 
 ERRORS = {
     "E0": "デバイス番号異常",
@@ -25,11 +25,13 @@ WORD_DEVICES = {"DM", "EM", "FM", "ZF", "W", "TM", "CM", "Z", "T", "C"}
 MAX_WORDS = 1000
 
 
-class KeyenceHostLink(TcpDriver):
+class KeyenceHostLink(NetDriver):
     name = "keyence"
 
-    def __init__(self, ip: str, port: int = 8501, timeout: float = 1.0):
-        super().__init__(ip, port, timeout)
+    def __init__(self, ip: str, port: int | None = None, timeout: float = 1.0, protocol: str = "tcp"):
+        if port is None:
+            port = 8500 if protocol.lower() == "udp" else 8501
+        super().__init__(ip, port, timeout, protocol)
 
     # --- 書式 ---------------------------------------------------------------
     @staticmethod

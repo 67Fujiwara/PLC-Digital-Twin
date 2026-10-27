@@ -154,3 +154,41 @@ def test_mock_memory_and_logic():
     assert out[0] >> 2 & 1 == 1     # ST1_UP
     m.mem.set_s32("DM", 50, -5)
     assert m.mem.s32("DM", 50) == -5
+
+
+def test_keyence_udp_roundtrip_with_fake_server():
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    mem = {}
+
+    def serve():
+        for _ in range(3):
+            data, addr = srv.recvfrom(65535)
+            p = data.decode().strip().split()
+            if p[0] == "RDS":
+                base, n = int(p[1].split(".")[0][2:]), int(p[2])
+                srv.sendto((" ".join(str(mem.get(base + i, 0)) for i in range(n)) + "\r\n").encode(), addr)
+            else:
+                base, n = int(p[1].split(".")[0][2:]), int(p[2])
+                for i in range(n):
+                    mem[base + i] = int(p[3 + i])
+                srv.sendto(b"OK\r\n", addr)
+
+    threading.Thread(target=serve, daemon=True).start()
+    d = KeyenceHostLink("127.0.0.1", port, protocol="udp")
+    assert d.port == port and d.t.name == "udp"
+    d.connect()
+    d.write_words("DM", 1100, [3, 4])
+    assert d.read_words("DM", 1100, 3) == [3, 4, 0]
+    d.close()
+    assert KeyenceHostLink("1.2.3.4", protocol="udp").port == 8500
+    assert KeyenceHostLink("1.2.3.4").port == 8501
+
+
+def test_clone_is_separate_connection():
+    d = KeyenceHostLink("127.0.0.1", 9, protocol="tcp")
+    c = d.clone()
+    assert c is not d and c.ip == d.ip and c.port == d.port and c.protocol == "tcp"
+    m = MelsecSLMP("127.0.0.1", 9, network=1, station=2)
+    mc = m.clone()
+    assert mc is not m and mc.network == 1 and mc.station == 2

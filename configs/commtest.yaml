@@ -8,7 +8,8 @@ plc:
   port: 8501
   out: {dev: DM, addr: 1000, words: 64}
   in:  {dev: DM, addr: 1100, words: 64}
-cycle_ms: 10
+cycle_ms: auto           # 実測して最速にする。固定したいときは 10 など
+# plc 側に protocol: udp / parallel_rw: true を足すとさらに短くできる (README 周期を速くする)
 tags:
   out:
     - {name: OUT_BIT0, bit: "0.0"}

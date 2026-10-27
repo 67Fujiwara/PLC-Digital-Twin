@@ -1,4 +1,4 @@
-"""三菱 MELSEC iQ-R / Q / L  SLMP (MCプロトコル 3Eフレーム・バイナリ) TCP。
+"""三菱 MELSEC iQ-R / Q / L  SLMP (MCプロトコル 3Eフレーム・バイナリ) TCP / UDP。
 
 GX Works3 側: [ユニットパラメータ]-[外部機器構成] で SLMP接続機器 (TCP, ポート例 5000〜) を追加。
 コマンド: 一括読出し 0x0401 / 一括書込み 0x1401、サブコマンド 0x0000 (ワード単位)。
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import struct
 
-from .base import TcpDriver, DriverError
+from .base import NetDriver, DriverError
 
 DEVICE_CODES = {
     "SM": 0x91, "SD": 0xA9, "X": 0x9C, "Y": 0x9D, "M": 0x90, "L": 0x92, "F": 0x93,
@@ -35,15 +35,20 @@ END_CODES = {
 }
 
 
-class MelsecSLMP(TcpDriver):
+class MelsecSLMP(NetDriver):
     name = "melsec"
 
     def __init__(self, ip: str, port: int = 5000, timeout: float = 1.0,
-                 network: int = 0, station: int = 0xFF, timer: int = 0x0010):
-        super().__init__(ip, port, timeout)
+                 network: int = 0, station: int = 0xFF, timer: int = 0x0010, protocol: str = "tcp"):
+        super().__init__(ip, port, timeout, protocol)
         self.network = network
         self.station = station
         self.timer = timer  # 監視タイマ (250ms単位)
+
+    def _ctor_args(self) -> dict:
+        d = super()._ctor_args()
+        d.update(network=self.network, station=self.station, timer=self.timer)
+        return d
 
     # --- フレーム -----------------------------------------------------------
     def _header(self, body: bytes) -> bytes:

@@ -82,6 +82,11 @@ function onMessage(m) {
   state.wsCount++;
   for (const s of m.samples) pushSample(s, true);
   state.sim = m.sim; state.stat = m.stat; state.forces = m.forces;
+  if (m.stat && m.stat.cycle_ms && state.cfg && m.stat.cycle_ms !== state.cfg.cycle_ms) {
+    state.cfg.cycle_ms = m.stat.cycle_ms;
+    state.maxSamples = Math.max(3000, Math.round(state.cfg.record_seconds * 1000 / m.stat.cycle_ms));
+    $("h-wave-res").textContent = `${m.stat.cycle_ms}ms 分解能`;
+  }
   for (const l of m.logs || []) addLog(l);
   updateHeader(m);
   updateDevices();
@@ -422,6 +427,7 @@ function updateHeader(m) {
   $("status").textContent = ok ? (st.sim_enabled ? "" : "Sim 停止中") : (st.error || st.status || "");
   const fx = (v, d, w) => (v ?? 0).toFixed(d).padStart(w, " ");
   $("s-period").textContent = fx(st.period_ms, 2, 5);
+  $("s-period").title = `設定周期 ${state.cfg.cycle_ms}ms${state.cfg.cycle_auto ? " (自動)" : ""}  通信 ${state.cfg.protocol || "tcp"}${state.cfg.parallel_rw ? " 読み書き並列" : ""}`;
   const j = st.jitter || {};
   $("s-jit").textContent = `${fx(j.avg, 2, 5)} / ${fx(j.p99, 2, 5)} / ${fx(j.max_all, 1, 5)}`;
   $("s-rw").textContent = `${fx(st.read_ms, 2, 5)} / ${fx(st.step_ms, 2, 5)} / ${fx(st.write_ms, 2, 5)}`;

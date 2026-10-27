@@ -15,7 +15,9 @@
 """
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
+import threading
 import time
 import traceback
 
@@ -132,6 +134,34 @@ class LoopState:
         }
 
 
+def measure_cycle(drv, cfg: TwinConfig, n: int = 100, parallel: bool = False, wdrv=None) -> dict:
+    """往復時間を実測して最速周期 (ms) を決める。read+write (並列なら max) の p99 に余裕 0.3ms、0.5ms 刻みに切上げ。"""
+    reads, writes, totals = [], [], []
+    zeros = [0] * cfg.inp.words
+    for _ in range(n):
+        t0 = time.perf_counter()
+        if parallel and wdrv is not None:
+            th = threading.Thread(target=wdrv.write_words, args=(cfg.inp.dev, cfg.inp.addr, zeros))
+            th.start()
+            drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
+            t1 = time.perf_counter()
+            th.join()
+            t2 = time.perf_counter()
+            reads.append(t1 - t0); writes.append(t2 - t1); totals.append(t2 - t0)
+        else:
+            drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
+            t1 = time.perf_counter()
+            drv.write_words(cfg.inp.dev, cfg.inp.addr, zeros)
+            t2 = time.perf_counter()
+            reads.append(t1 - t0); writes.append(t2 - t1); totals.append(t2 - t0)
+    totals.sort()
+    p99 = totals[min(len(totals) - 1, int(len(totals) * 0.99))] * 1000
+    avg = sum(totals) / len(totals) * 1000
+    cycle = max(0.5, math.ceil((p99 + 0.3) / 0.5) * 0.5)
+    return {"cycle_ms": cycle, "avg_ms": round(avg, 3), "p99_ms": round(p99, 3), "max_ms": round(totals[-1] * 1000, 3),
+            "read_avg_ms": round(sum(reads) / len(reads) * 1000, 3), "write_avg_ms": round(sum(writes) / len(writes) * 1000, 3)}
+
+
 def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
     """ループプロセスのエントリ。"""
     cfg = parse_config(raw_cfg)
@@ -139,8 +169,22 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
     prio_msg = raise_priority()
     period = cfg.cycle_ms / 1000.0
     drv = make_driver(cfg.plc)
+    parallel = bool(cfg.plc.get("parallel_rw", False))
+    wdrv = drv.clone() if parallel else None          # 書込み専用の 2 本目の接続
+    if parallel and wdrv is drv:
+        parallel, wdrv = False, None
     jit = JitterStats(200)
-    snap_conn.send({"type": "log", "msg": f"ループ開始 周期 {cfg.cycle_ms}ms, {prio_msg}, driver={drv.name}"})
+    measured: dict | None = None
+    snap_conn.send({"type": "log", "msg": f"ループ開始 周期 {'auto' if cfg.cycle_auto else cfg.cycle_ms}ms, {prio_msg}, "
+                                          f"driver={drv.name}/{cfg.plc.get('protocol', 'tcp')}, 並列R/W={'on' if parallel else 'off'}"})
+    write_thread: threading.Thread | None = None
+    write_err: list = []
+
+    def do_write(vals: list[int]) -> None:
+        try:
+            wdrv.write_words(cfg.inp.dev, cfg.inp.addr, vals)
+        except DriverError as e:
+            write_err.append(e)
 
     next_t = time.perf_counter()
     last_t = next_t
@@ -149,7 +193,7 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
     cycle = 0
     while not stop_event.is_set():
         next_t += period
-        sleep_until(next_t)
+        sleep_until(next_t, cfg.spin_ms / 1000.0)
         now = time.perf_counter()
         actual_ms = (now - last_t) * 1000.0
         last_t = now
@@ -174,18 +218,35 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
             if now >= reconnect_at:
                 try:
                     drv.connect()
+                    if wdrv is not None:
+                        wdrv.connect()
                     st.status, st.error = "connected", ""
                     snap_conn.send({"type": "log", "msg": f"PLC接続 {cfg.plc_type} {cfg.plc.get('ip', '')}"})
+                    if cfg.cycle_auto and measured is None:
+                        measured = measure_cycle(drv, cfg, 100, parallel, wdrv)
+                        period = measured["cycle_ms"] / 1000.0
+                        cfg.cycle_ms = measured["cycle_ms"]
+                        st.cfg.cycle_ms = measured["cycle_ms"]
+                        next_t = time.perf_counter()
+                        snap_conn.send({"type": "log", "msg": (
+                            f"周期自動決定: {measured['cycle_ms']}ms  (往復 avg {measured['avg_ms']}ms / p99 {measured['p99_ms']}ms / "
+                            f"max {measured['max_ms']}ms, 読み {measured['read_avg_ms']}ms 書き {measured['write_avg_ms']}ms, 100回実測)")})
                 except DriverError as e:
                     st.status, st.error = "disconnected", str(e)
+                    drv.close()
+                    if wdrv is not None:
+                        wdrv.close()
                     reconnect_at = now + 1.0
             st.seq += 1
             if cycle % 10 == 0:
                 snap_conn.send(_snapshot(st, now, actual_ms, read_ms, write_ms, step_ms, jit, drv))
             continue
 
-        # --- 読み -------------------------------------------------------
+        # --- 読み (並列 R/W なら前周期の in ブロック書込みを同時に走らせる) ----------
         t0 = time.perf_counter()
+        if parallel:
+            write_thread = threading.Thread(target=do_write, args=(list(st.inp),), daemon=True)
+            write_thread.start()
         try:
             vals = drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
             st.out[:] = vals
@@ -198,6 +259,10 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
         except DriverError as e:
             st.status, st.error = "disconnected", str(e)
             drv.close()
+            if wdrv is not None:
+                wdrv.close()
+            if write_thread is not None:
+                write_thread.join(timeout=1.0)
             reconnect_at = time.perf_counter() + 1.0
             snap_conn.send({"type": "log", "level": "error", "msg": f"読出し失敗: {e}"})
             continue
@@ -215,7 +280,12 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
 
         # --- 書き -------------------------------------------------------
         try:
-            drv.write_words(cfg.inp.dev, cfg.inp.addr, st.inp)
+            if parallel:
+                write_thread.join()
+                if write_err:
+                    raise write_err.pop()
+            else:
+                drv.write_words(cfg.inp.dev, cfg.inp.addr, st.inp)
             while st.pending_writes:
                 dev, addr, vals = st.pending_writes.pop(0)
                 drv.write_words(dev, addr, vals)
@@ -223,6 +293,8 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
         except DriverError as e:
             st.status, st.error = "disconnected", str(e)
             drv.close()
+            if wdrv is not None:
+                wdrv.close()
             reconnect_at = time.perf_counter() + 1.0
             snap_conn.send({"type": "log", "level": "error", "msg": f"書込み失敗: {e}"})
             continue
@@ -233,6 +305,8 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
         snap_conn.send(_snapshot(st, now, actual_ms, read_ms, write_ms, step_ms, jit, drv))
 
     drv.close()
+    if wdrv is not None:
+        wdrv.close()
     snap_conn.send({"type": "log", "msg": "ループ終了"})
 
 
@@ -256,6 +330,7 @@ def _snapshot(st: LoopState, now: float, actual_ms: float, read_ms: float, write
             "step_ms": round(step_ms, 3),
             "jitter": jit.summary(),
             "sim_enabled": st.sim_enabled,
+            "cycle_ms": st.cfg.cycle_ms,
         },
         "forces": st.forces_public(),
     }
