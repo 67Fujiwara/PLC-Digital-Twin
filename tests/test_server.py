@@ -152,6 +152,8 @@ def test_app_end_to_end(tmp_path):
             got_hello = False
             for _ in range(60):
                 op, data = await read_frame(r)
+                if op != 0x1:                      # 制御フレーム (pong) は読み飛ばす
+                    continue
                 mm = json.loads(data)
                 if mm["type"] == "hello":
                     got_hello = any(t["name"] == "生産数" for t in mm["config"]["tags"]["watch"])
