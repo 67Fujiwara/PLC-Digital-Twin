@@ -11,7 +11,7 @@ import threading
 import time
 from collections import deque
 
-from ..config import TwinConfig, parse_config, save_watch
+from ..config import TwinConfig, parse_config, save_watch, tags_sidecar_path
 from ..core.loop import run_loop
 from .http import WebServer, WSClient, Request
 
@@ -31,6 +31,7 @@ class TwinApp:
         self.server.route("GET", "/api/record.csv")(self._api_record_csv)
         self.server.route("GET", "/api/stat")(self._api_stat)
         self.server.route("POST", "/api/cmd")(self._api_cmd)
+        self.server.route("POST", "/api/import")(self._api_import)
 
         maxlen = int(cfg.record_seconds * 1000 / cfg.cycle_ms) + 10
         self.ring: deque[dict] = deque(maxlen=maxlen)
@@ -84,9 +85,11 @@ class TwinApp:
         print(f"[info] ブラウザ接続 {client.peer}", flush=True)
         hello = {"type": "hello", "config": self.cfg.to_public(), "server_time": time.time()}
         await client.send_text(json.dumps(hello, ensure_ascii=False))
-        # 接続直後に履歴 (波形用) をまとめて送る
+        # 接続直後に履歴 (波形用) をまとめて送る (監視ワードが多いときはサイズで打ち切り: 約 2MB まで)
+        per_sample = 6 * (self.cfg.out.words + self.cfg.inp.words + self.cfg.watch_words) + 60
+        n_hist = max(100, min(3000, 2_000_000 // per_sample))
         with self.lock:
-            hist = list(self.ring)[-3000:]
+            hist = list(self.ring)[-n_hist:]
         if hist:
             await client.send_text(json.dumps({"type": "history", "samples": hist}, separators=(",", ":")))
 
@@ -177,6 +180,65 @@ class TwinApp:
     async def _api_cmd(self, req: Request):
         self.send_cmd(req.json())
         return 200, "application/json", b'{"ok":true}'
+
+    async def _api_import(self, req: Request):
+        """PLC のラベル/デバイスコメント CSV を取り込み、<設定>.tags.yaml に保存して設定を読み直す。"""
+        from ..importer import import_text, to_yaml, ImportResult
+        from ..config import load_config
+        import yaml as _yaml
+        raw = req.body
+        text = None
+        for enc in ("utf-8-sig", "cp932", "utf-8", "utf-16"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            return 400, "application/json", json.dumps({"error": "文字コードを判別できません"}).encode()
+        include_system = req.query.get("system") == "1"
+        replace = req.query.get("replace") == "1"
+        ts = tags_sidecar_path(self.config_path) if self.config_path else None
+        old: dict = {}
+        if ts and os.path.isfile(ts):
+            with open(ts, "r", encoding="utf-8") as f:
+                old = _yaml.safe_load(f) or {}
+        old_names = {t["name"] for b in ("out", "in") for t in ((old.get("tags") or {}).get(b) or [])}
+        old_names |= {n for w in (old.get("watch") or []) for n in (w.get("names") or []) if n}
+        res = import_text(text, self.cfg, include_system=include_system, replaceable=old_names)
+        if res.count == 0:
+            return 400, "application/json; charset=utf-8", json.dumps(
+                {"error": "CSV からデバイスを読み取れませんでした", "skipped": res.skipped[:20]}, ensure_ascii=False).encode()
+        if not self.config_path:
+            return 400, "application/json; charset=utf-8", json.dumps({"error": "設定ファイルのパスが無いため保存できません"}, ensure_ascii=False).encode()
+        merged = ImportResult()
+        if old and not replace:                            # 前回の取込と結合 (同名タグ・同じ範囲は新しい方)
+            for b in ("out", "in"):
+                names = {t["name"] for t in res.tags[b]}
+                merged.tags[b] = [t for t in ((old.get("tags") or {}).get(b) or []) if t["name"] not in names]
+            new_keys = {(w["dev"], w["addr"]) for w in res.watch}
+            merged.watch = [w for w in (old.get("watch") or []) if (w["dev"], w["addr"]) not in new_keys]
+        for b in ("out", "in"):
+            merged.tags[b] += res.tags[b]
+        merged.watch += res.watch
+        with open(ts, "w", encoding="utf-8") as f:
+            f.write(to_yaml(merged, req.query.get("name", "upload.csv")))
+        try:
+            new_cfg = load_config(self.config_path)
+        except Exception as e:  # noqa: BLE001
+            return 400, "application/json; charset=utf-8", json.dumps({"error": f"取込後の設定エラー: {e}"}, ensure_ascii=False).encode()
+        self.cfg = new_cfg
+        self.send_cmd({"type": "set_watch", "watch": new_cfg.raw["watch"]})
+        msg = (f"CSV 取込: tags.out {len(res.tags['out'])}, tags.in {len(res.tags['in'])}, "
+               f"watch {len(res.watch)} エントリ ({sum(w['words'] for w in res.watch)} ワード), 除外 {len(res.skipped)}  保存: {ts}")
+        with self.lock:
+            self.logs.append({"t": time.time(), "level": "info", "msg": msg})
+        print(f"[info] {msg}", flush=True)
+        hello = json.dumps({"type": "hello", "config": self.cfg.to_public(), "server_time": time.time()}, ensure_ascii=False)
+        await self.server.broadcast(hello)
+        return 200, "application/json; charset=utf-8", json.dumps(
+            {"ok": True, "out": len(res.tags["out"]), "in": len(res.tags["in"]), "watch": len(res.watch),
+             "words": sum(w["words"] for w in res.watch), "skipped": res.skipped[:40], "saved": ts}, ensure_ascii=False).encode()
 
     async def _api_record_csv(self, req: Request):
         with self.lock:

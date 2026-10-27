@@ -16,7 +16,7 @@ watch:                                     # 100ms ごとに読む追加監視 (
   - {dev: DM, addr: 0, words: 8}           # DM0〜DM7
   - {dev: MR, addr: 0, words: 2}           # MR000〜MR115 (ビット展開)
   - {dev: CM, addr: 700, words: 2, names: [SCAN_CUR_x10us, SCAN_MAX_x10us]}
-watch_every: 10
+
 
 tags:
   out:

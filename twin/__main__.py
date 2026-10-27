@@ -17,11 +17,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fps", type=float, default=30.0, help="ブラウザ配信レート (Hz)")
     ap.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
     ap.add_argument("--check", action="store_true", help="設定の検証のみ")
+    ap.add_argument("--mock", action="store_true", help="PLC に接続せずモックで起動 (画面と設定の確認用)")
     args = ap.parse_args(argv)
 
     from .config import load_config
     try:
         cfg = load_config(args.config)
+        if args.mock and cfg.plc_type != "mock":
+            from .config import parse_config
+            raw = dict(cfg.raw)
+            raw["plc"] = dict(raw.get("plc") or {})
+            raw["plc"]["driver"] = "mock"          # アドレス解釈は実機のまま、通信だけモック
+            cfg = parse_config(raw)
+            print("[info] --mock: PLC に接続せずモックで動作します (全デバイス 0)")
     except Exception as e:  # noqa: BLE001
         print(f"設定エラー: {e}", file=sys.stderr)
         return 2

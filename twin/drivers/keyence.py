@@ -37,6 +37,8 @@ class KeyenceHostLink(TcpDriver):
         dev = dev.upper()
         if dev == "B":
             return f"B{addr:X}"
+        if dev == "W":
+            return f"W{addr:04X}"
         return f"{dev}{addr}"
 
     @classmethod

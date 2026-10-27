@@ -2,7 +2,7 @@
 
 1周期:
   out   = plc.read_words(out block)         # PLC -> PC
-  (watch_every 周期に1回) watch を読む
+  (watch_every 周期に1回) watch を 1 エントリ読む (ラウンドロビン)
   コマンド処理 (強制/書込み/リセット)
   sim.step(dt)  -> in ブロック更新
   強制値を in へ上書き
@@ -42,6 +42,7 @@ class LoopState:
         self.status = "init"
         self.error = ""
         self.seq = 0
+        self.watch_idx = 0
 
     # --- コマンド -------------------------------------------------------
     def handle(self, cmd: dict) -> None:
@@ -189,9 +190,11 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
             vals = drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
             st.out[:] = vals
             if st.cfg.watch and cycle % st.cfg.watch_every == 0:
-                for w in st.cfg.watch:
-                    v = drv.read_words(w.dev, w.addr, w.words)
-                    st.watch[w.offset:w.offset + w.words] = v
+                # 監視デバイスは 1 周期に 1 エントリずつ順番に読む (多数登録しても周期を崩さない)
+                w = st.cfg.watch[st.watch_idx % len(st.cfg.watch)]
+                st.watch_idx += 1
+                v = drv.read_words(w.dev, w.addr, w.words)
+                st.watch[w.offset:w.offset + w.words] = v
         except DriverError as e:
             st.status, st.error = "disconnected", str(e)
             drv.close()

@@ -5,7 +5,7 @@ from .base import Driver, DriverError
 
 
 def make_driver(plc: dict) -> Driver:
-    t = str(plc.get("type", "mock")).lower()
+    t = str(plc.get("driver") or plc.get("type", "mock")).lower()   # driver: mock で型はそのまま通信だけモック
     if t == "keyence":
         from .keyence import KeyenceHostLink
         return KeyenceHostLink(plc.get("ip", "192.168.0.10"), int(plc.get("port", 8501)),

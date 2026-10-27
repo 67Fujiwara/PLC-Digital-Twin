@@ -29,8 +29,8 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from .config import (BlockSpec, HEX_BIT_DEVICES, KEYENCE_CH_DEVICES, is_bit_device, load_config,
-                     bit_address, word_address)
+from .config import (BlockSpec, KEYENCE_CH_DEVICES, SYSTEM_DEVICES, is_bit_device, is_hex_device,
+                     load_config, TwinConfig)
 
 NAME_KEYS = ("ラベル名", "変数名", "label name", "name", "名前", "変数")
 DEV_KEYS = ("割付", "デバイス", "device", "assign")
@@ -149,7 +149,7 @@ def parse_device(plc_type: str, s: str) -> tuple[str, int, int | None] | None:
     if not m:
         return None
     dev, num, bit = m.group(1), m.group(2), m.group(3)
-    is_hex = dev in HEX_BIT_DEVICES.get(plc_type, set()) or (plc_type == "melsec" and dev in ("W", "SW", "ZR"))
+    is_hex = is_hex_device(plc_type, dev)
     try:
         n = int(num, 16) if is_hex else int(num)
         b = int(bit, 16) if bit is not None else None
@@ -188,10 +188,12 @@ def sanitize(name: str, used: set[str]) -> str:
     return n
 
 
-def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec) -> ImportResult:
+def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec,
+          include_system: bool = False, used: set[str] | None = None) -> ImportResult:
     res = ImportResult()
-    used: set[str] = set()
+    used = set() if used is None else used
     watch_words: dict[tuple[str, int], dict] = {}   # (dev, word_addr) -> {"bits": bool, "names": {idx: name}}
+    sys_skipped = 0
     for lb in labels:
         if not lb.device:
             res.skipped.append((lb.name, "デバイス割付なし (自動割付のラベルは通信で読めません)"))
@@ -201,6 +203,9 @@ def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec) ->
             res.skipped.append((lb.name, f"デバイス表記を解釈できません: {lb.device}"))
             continue
         dev, num, wbit = pd
+        if not include_system and dev in SYSTEM_DEVICES.get(plc_type, set()):
+            sys_skipped += 1
+            continue
         bitdev = is_bit_device(plc_type, dev)
         dtype = norm_dtype(lb.dtype)
         if bitdev:
@@ -253,6 +258,8 @@ def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec) ->
             e["names"][0] = name
             if dtype in ("u32", "s32"):
                 watch_words.setdefault((dev, num + 1), {"bits": False, "names": {}, "dtype": "u16"})
+    if sys_skipped:
+        res.skipped.append((f"{sys_skipped} 件", f"システムデバイス {sorted(SYSTEM_DEVICES.get(plc_type, set()))} は除外 (--include-system で取込)"))
     # --- watch をデバイス種別ごとに連続範囲へまとめる (隙間 2 ワードまで結合, 1 エントリ 64 ワードまで) ---
     by_dev: dict[str, list[int]] = {}
     for (dev, addr) in watch_words:
@@ -282,6 +289,14 @@ def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec) ->
     return res
 
 
+def import_text(text: str, cfg: TwinConfig, include_system: bool = False,
+                replaceable: set[str] | None = None) -> ImportResult:
+    """CSV テキスト -> ImportResult。既存タグ名と重複しない名前を付ける (replaceable = 前回取込分は除く)。"""
+    labels = parse_labels(text)
+    used = {t.name for b in cfg.tags.values() for t in b} - (replaceable or set())
+    return build(labels, cfg.plc_type, cfg.out, cfg.inp, include_system=include_system, used=used)
+
+
 def to_yaml(res: ImportResult, source: str) -> str:
     head = (f"# {os.path.basename(source)} から自動生成 (python -m twin.importer)。\n"
             f"# 元の設定 YAML に  include: [{'<このファイル名>'}]  を書いて読み込む。再インポートで上書きされる。\n")
@@ -294,13 +309,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", required=True, help="装置の設定 YAML (plc.type, out/in ブロックを参照)")
     ap.add_argument("--out", help="出力 YAML (省略時は <config>.tags.yaml)")
     ap.add_argument("--dry-run", action="store_true", help="書き出さず内容だけ表示")
+    ap.add_argument("--include-system", action="store_true", help="システムデバイス (KV: CM/CR, R: SM/SD) も取り込む")
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
     labels = parse_labels(read_csv_text(args.csv))
     if not labels:
         print("CSV からラベルを読み取れませんでした (列名: ラベル名/変数名, 割付/デバイス, データ型, コメント)", file=sys.stderr)
         return 2
-    res = build(labels, cfg.plc_type, cfg.out, cfg.inp)
+    res = build(labels, cfg.plc_type, cfg.out, cfg.inp, include_system=args.include_system)
     out_path = args.out or (os.path.splitext(args.config)[0] + ".tags.yaml")
     text = to_yaml(res, args.csv)
     print(f"読込 {len(labels)} 行 → tags.out {len(res.tags['out'])}, tags.in {len(res.tags['in'])}, "
@@ -316,7 +332,9 @@ def main(argv: list[str] | None = None) -> int:
         f.write(text)
     inc = os.path.basename(out_path)
     print(f"書出し: {out_path}")
-    if inc not in (cfg.raw.get("include") or []):
+    if out_path == os.path.splitext(args.config)[0] + ".tags.yaml":
+        print("→ 設定ファイルと同じ名前の .tags.yaml なので、次回起動時に自動で読み込まれます")
+    elif inc not in (cfg.raw.get("include") or []):
         print(f"→ {args.config} に次を追加してください:\n    include: [{inc}]")
     return 0
 

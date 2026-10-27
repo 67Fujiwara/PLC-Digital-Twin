@@ -83,23 +83,24 @@ objects:
    - **GX Works3**: ナビゲーション → ラベル → グローバルラベル（またはプログラムのローカルラベル）を開き、
      ラベルエディタ上で右クリック → **CSV 書き出し**。デバイスコメントは「デバイスコメント」画面から同じく CSV 書き出し。
    - **KV STUDIO**: 変数（KV-8000）は「変数」ウィンドウ → **エクスポート**。デバイスコメントは「デバイスコメント編集」→ CSV 出力。
-2. 変換する
+2. 取り込む（どちらでも可）
+   - **画面から**: ヘッダの「CSV 取込」でファイルを選ぶ。その場でデバイスが増え、`configs/line_a.tags.yaml` に保存される
+   - **コマンドで**:
 
 ```bash
 python -m twin.importer labels.csv --config configs/line_a.yaml
 # → configs/line_a.tags.yaml を生成 (tags.out / tags.in / watch)
 ```
 
-3. `configs/line_a.yaml` に 1 行足す
+3. 以上。`<設定名>.tags.yaml` は次回起動時に自動で読み込まれる（別名にしたときだけ `include: [ファイル名]` を書く）。
 
-```yaml
-include: [line_a.tags.yaml]
-```
+実機がまだ無いときは `python -m twin configs/line_a.yaml --mock` で、通信だけモックにして画面とデバイス一覧を確認できる。
 
 ブロック内（DM1000〜 / DM1100〜）に割り付けたラベルは `tags.out` / `tags.in` に、
 それ以外（M、MR、D0〜 など）は `watch` に名前付きで入る。データ型（Bit / INT / DINT / UINT…）から bit / s16 / s32 / u16 を決める。
 ラベルを増やしたら CSV を書き出して同じコマンドを打ち直すだけ。
 
+KV の CM/CR、三菱の SM/SD などシステムデバイスのコメントは既定で除外する（`--include-system`、画面では取込時の確認で選択）。
 注意: GX Works3 のローカルラベルや KV の変数で **デバイス割付なし（自動割付）** のものは通信で読めないため除外される（一覧に出る）。
 見たいラベルには割付デバイスを指定するか、グローバルラベルにして M/D を割り付ける。
 

@@ -48,10 +48,13 @@ async def read_frame(reader):
 
 
 @pytest.mark.timeout(60)
-def test_app_end_to_end():
-    cfg = load_config(os.path.join(ROOT, "configs", "demo_line.yaml"))
+def test_app_end_to_end(tmp_path):
+    import shutil
+    cfg_path = str(tmp_path / "demo.yaml")
+    shutil.copy(os.path.join(ROOT, "configs", "demo_line.yaml"), cfg_path)
+    cfg = load_config(cfg_path)
     port = free_port()
-    app = TwinApp(cfg, "127.0.0.1", port, fps=30)
+    app = TwinApp(cfg, "127.0.0.1", port, fps=30, config_path=cfg_path)
 
     async def scenario():
         app.start_loop()
@@ -129,6 +132,31 @@ def test_app_end_to_end():
                     got_pong = True
                     break
             assert got_pong
+            # CSV 取込 (KV STUDIO デバイスコメント形式、cp932) -> 2 回目も名前が変わらない
+            csv_body = "DM500,,生産数,,\r\nMR300,,運転中,,\r\nCM0,,ｼｽﾃﾑ,,\r\n".encode("cp932")
+            for _ in range(2):
+                r2, w2 = await asyncio.open_connection("127.0.0.1", port)
+                w2.write(b"POST /api/import?name=a.csv HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+                         + f"Content-Length: {len(csv_body)}\r\n\r\n".encode() + csv_body)
+                data = await r2.read()
+                assert b"200 OK" in data, data[:200]
+                j = json.loads(data.split(b"\r\n\r\n", 1)[1])
+                assert j["watch"] == 2 and j["words"] == 2
+                w2.close()
+            assert app.cfg.tag("watch", "生産数").address == "DM500"
+            assert app.cfg.tag("watch", "運転中").address == "MR300"
+            assert app.cfg.tag("watch", "生産数_2") is None
+            assert app.cfg.tag("watch", "TIMER_X10") is not None          # 本体 YAML の watch も残る
+            assert os.path.isfile(str(tmp_path / "demo.tags.yaml"))
+            # 取込後の hello が届く
+            got_hello = False
+            for _ in range(60):
+                op, data = await read_frame(r)
+                mm = json.loads(data)
+                if mm["type"] == "hello":
+                    got_hello = any(t["name"] == "生産数" for t in mm["config"]["tags"]["watch"])
+                    break
+            assert got_hello
             # CSV
             w.close()
             r, w = await asyncio.open_connection("127.0.0.1", port)

@@ -14,7 +14,7 @@ record_seconds: 120
 watch:
   - {dev: DM, addr: 100, words: 4, names: [TIMER_X10, COUNT_X7]}
   - {dev: MR, addr: 100, words: 1}        # MR100..MR115 (ビット展開)
-watch_every: 10
+
 
 tags:
   out:   # PLC -> PC

@@ -88,6 +88,7 @@ class WatchSpec:
     offset: int = 0       # watch ワード配列内の先頭オフセット
     bits: bool = False    # ビットデバイスか (表示をビット展開)
     names: list[str] = field(default_factory=list)
+    source: str = ""      # "import" = CSV 取込 (.tags.yaml) 由来
 
 
 @dataclass
@@ -124,7 +125,7 @@ class TwinConfig:
         return {
             "title": self.title,
             "plc": {"type": self.plc_type, "ip": self.plc.get("ip", ""),
-                    "port": self.plc.get("port", "")},
+                    "port": self.plc.get("port", ""), "driver": self.plc.get("driver", "")},
             "cycle_ms": self.cycle_ms,
             "out": self.out.to_dict(),
             "in": self.inp.to_dict(),
@@ -140,7 +141,14 @@ class TwinConfig:
 # アドレス表記 (表示用)
 # ---------------------------------------------------------------------------
 HEX_BIT_DEVICES = {"keyence": {"B"}, "melsec": {"X", "Y", "B", "SB", "DX", "DY"}}
+HEX_WORD_DEVICES = {"keyence": {"W"}, "melsec": {"W", "SW", "ZR"}}
 KEYENCE_CH_DEVICES = {"MR", "R", "LR", "CR", "VB"}
+SYSTEM_DEVICES = {"keyence": {"CM", "CR"}, "melsec": {"SM", "SD", "SB", "SW"}, "mock": {"CM", "CR"}}
+
+
+def is_hex_device(plc_type: str, dev: str) -> bool:
+    dev = dev.upper()
+    return dev in HEX_BIT_DEVICES.get(plc_type, set()) or dev in HEX_WORD_DEVICES.get(plc_type, set())
 
 
 def bit_address(plc_type: str, dev: str, word_addr: int, word_off: int, bit: int) -> str:
@@ -156,7 +164,9 @@ def bit_address(plc_type: str, dev: str, word_addr: int, word_off: int, bit: int
 
 def word_address(plc_type: str, dev: str, word_addr: int, word_off: int) -> str:
     dev = dev.upper()
-    if dev in HEX_BIT_DEVICES.get(plc_type, set()) or (plc_type == "melsec" and dev in ("W", "SW", "ZR")):
+    if is_hex_device(plc_type, dev):
+        if plc_type == "keyence" and dev == "W":
+            return f"{dev}{(word_addr + word_off):04X}"
         return f"{dev}{(word_addr + word_off):X}"
     return f"{dev}{word_addr + word_off}"
 
@@ -284,6 +294,12 @@ def sidecar_path(path: str) -> str:
     return base + ".watch.yaml"
 
 
+def tags_sidecar_path(path: str) -> str:
+    """CSV 取込で生成した tags/watch の保存先: <設定名>.tags.yaml (存在すれば自動で include)"""
+    base, _ = os.path.splitext(path)
+    return base + ".tags.yaml"
+
+
 def _merge_include(raw: dict, base_dir: str) -> dict:
     """include: [a.yaml, ...] の tags / watch / objects を取り込む (本体側が後ろに付く)。"""
     incs = raw.get("include") or []
@@ -310,19 +326,38 @@ def _merge_include(raw: dict, base_dir: str) -> dict:
 
 
 def load_config(path: str) -> TwinConfig:
+    """読込順: 本体 YAML + include → <名前>.watch.yaml があれば watch を置換 → <名前>.tags.yaml (CSV 取込) を追加。"""
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+    ts = tags_sidecar_path(path)
+    incs = raw.get("include") or []
+    incs = [incs] if isinstance(incs, str) else list(incs)
+    raw["include"] = [i for i in incs if os.path.basename(i) != os.path.basename(ts)]   # .tags.yaml は自動読込 (二重防止)
     raw = _merge_include(raw, os.path.dirname(os.path.abspath(path)))
     sc = sidecar_path(path)
     if os.path.isfile(sc):
         with open(sc, "r", encoding="utf-8") as f:
             side = yaml.safe_load(f) or {}
         if isinstance(side, dict) and "watch" in side:
-            raw["watch"] = side["watch"]
+            raw["watch"] = list(side["watch"] or [])
+    ts = tags_sidecar_path(path)
+    if os.path.isfile(ts):
+        with open(ts, "r", encoding="utf-8") as f:
+            imp = yaml.safe_load(f) or {}
+        for b in ("out", "in", "watch"):
+            raw["tags"][b] = list((imp.get("tags") or {}).get(b) or []) + raw["tags"][b]
+        for w in imp.get("watch") or []:
+            w = dict(w)
+            w["source"] = "import"
+            raw["watch"].append(w)
     return parse_config(raw)
 
 
 def save_watch(path: str, watch: list) -> str:
+    """UI から保存。CSV 取込由来 (source: import) は .tags.yaml 側にあるので除く。"""
+    watch = [dict(w) for w in watch if w.get("source") != "import"]
+    for w in watch:
+        w.pop("source", None)
     sc = sidecar_path(path)
     with open(sc, "w", encoding="utf-8") as f:
         f.write("# 画面 (監視デバイス) から保存した追加監視。元の YAML の watch より優先される。\n")
@@ -348,14 +383,14 @@ def parse_config(raw: dict) -> TwinConfig:
         dev = str(w["dev"]).upper()
         addr = w.get("addr", 0)
         if isinstance(addr, str):
-            addr = int(addr, 16) if dev in HEX_BIT_DEVICES.get(plc_type, set()) | {"W", "ZR"} else int(addr)
+            addr = int(addr, 16) if is_hex_device(plc_type, dev) else int(addr)
         words = int(w.get("words", 1))
         bits = bool(w.get("bits", is_bit_device(plc_type, dev)))
         names = [str(n) for n in (w.get("names") or [])]
-        watch.append(WatchSpec(dev, int(addr), words, off, bits, names))
+        watch.append(WatchSpec(dev, int(addr), words, off, bits, names, str(w.get("source", ""))))
         off += words
     watch_words = off
-    watch_every = int(raw.get("watch_every", 10))
+    watch_every = int(raw.get("watch_every", 2))
 
     tags_raw = raw.get("tags") or {}
     tags: dict[str, list[Tag]] = {"out": [], "in": [], "watch": []}

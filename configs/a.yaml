@@ -1,0 +1,17 @@
+# a.csv (KV STUDIO デバイスコメント) から取り込んだ装置。実機の IP に書き換えて使う。
+#   python -m twin configs/a.yaml          # 実機 (KV, 上位リンク 8501)
+#   python -m twin configs/a.yaml --mock   # 実機なしで画面・デバイス一覧だけ確認
+# デバイス名は configs/a.tags.yaml (CSV 取込で自動生成、画面の「CSV 取込」で更新可)
+title: Line A (KV)
+plc:
+  type: keyence
+  ip: 192.168.0.10
+  port: 8501
+  out: {dev: DM, addr: 1000, words: 64}   # PLC -> PC (I/O 層を入れたら使う)
+  in:  {dev: DM, addr: 1100, words: 64}   # PC -> PLC
+cycle_ms: 10
+record_seconds: 120
+tags:
+  out: []
+  in: []
+objects: []

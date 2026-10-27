@@ -64,10 +64,15 @@ def test_cli_and_include(tmp_path):
     rc = main([os.path.join(S, "gxworks3_global_labels.csv"), "--config", str(cfgp)])
     assert rc == 0 and (tmp_path / "line.tags.yaml").is_file()
     raw = yaml.safe_load(cfgp.read_text(encoding="utf-8"))
-    raw["include"] = ["line.tags.yaml"]
+    raw["include"] = ["line.tags.yaml"]           # 書いても書かなくても同じ (自動読込、二重にならない)
     raw["tags"]["out"].append({"name": "EXTRA", "bit": "3.15"})
     cfgp.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
     cfg = load_config(str(cfgp))
     assert cfg.tag("out", "wWorkCount") is not None and cfg.tag("out", "EXTRA") is not None
     assert cfg.tag("watch", "iRecipeNo").address == "D100"
     assert cfg.objects                                       # 本体の objects は残る
+    assert [w.source for w in cfg.watch if w.dev == "D" and w.addr == 100] == ["import"]
+    # include 行を消しても自動で読み込まれる
+    raw.pop("include")
+    cfgp.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    assert load_config(str(cfgp)).tag("out", "wWorkCount") is not None

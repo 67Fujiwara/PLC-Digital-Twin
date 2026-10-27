@@ -20,7 +20,7 @@ watch:
   - {dev: D, addr: 0, words: 8}
   - {dev: M, addr: 0, words: 2}          # M0〜M31 (先頭は16の倍数)
   - {dev: SD, addr: 520, words: 2, names: [SCAN_CUR_ms, SCAN_CUR_us]}
-watch_every: 10
+
 
 tags:
   out:

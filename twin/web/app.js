@@ -102,7 +102,7 @@ function setup(cfg) {
   state.cfg = cfg;
   document.title = cfg.title;
   $("title").textContent = cfg.title;
-  $("plcinfo").textContent = `${cfg.plc.type.toUpperCase()} ${cfg.plc.ip || ""}${cfg.plc.port ? ":" + cfg.plc.port : ""}`;
+  $("plcinfo").textContent = `${cfg.plc.type.toUpperCase()} ${cfg.plc.ip || ""}${cfg.plc.port ? ":" + cfg.plc.port : ""}${cfg.plc.driver === "mock" ? " (モック: 未接続)" : ""}`;
   state.maxSamples = Math.max(3000, Math.round(cfg.record_seconds * 1000 / cfg.cycle_ms));
   state.tags = []; state.tagByKey.clear();
   for (const b of ["out", "in", "watch"]) for (const t of cfg.tags[b] || []) { state.tags.push(t); state.tagByKey.set(tagKey(t), t); }
@@ -110,7 +110,7 @@ function setup(cfg) {
   $("h-in").textContent = `${cfg.in.dev}${cfg.in.addr} × ${cfg.in.words}w`;
   $("h-watch").textContent = cfg.watch.map(w => `${w.dev}${w.addr}×${w.words}w`).join(", ") || "なし";
   $("p-watch").classList.toggle("hidden", !cfg.watch.length);
-  state.watchEntries = cfg.watch.map(w => ({dev: w.dev, addr: w.addr, words: w.words, names: w.names, bits: w.bits}));
+  state.watchEntries = cfg.watch.map(w => ({dev: w.dev, addr: w.addr, words: w.words, names: w.names, bits: w.bits, source: w.source}));
   loadHidden();
   buildDevices();
   buildRaw();
@@ -166,7 +166,8 @@ $("vis-none").onclick = () => { for (const t of state.tags) state.hidden.add(tag
 function buildWatchList() {
   const box = $("watch-list"); box.innerHTML = "";
   state.watchEntries.forEach((w, i) => {
-    const d = el("span", "we", `${w.dev}${w.addr} ×${w.words}${w.bits ? " (bit)" : ""}`);
+    const d = el("span", "we", `${w.dev}${w.addr} ×${w.words}${w.bits ? " (bit)" : ""}${w.source === "import" ? " 📄" : ""}`);
+    if (w.source === "import") d.title = "CSV 取込由来 (.tags.yaml)";
     const x = el("span", "x", "✕"); x.title = "削除";
     x.onclick = () => { state.watchEntries.splice(i, 1); sendWatch(false); };
     d.appendChild(x); box.appendChild(d);
@@ -198,6 +199,7 @@ function sendWatch(save) {
   send({type: "set_watch", save, watch: state.watchEntries.map(w => {
     const o = {dev: w.dev, addr: w.addr, words: w.words, bits: w.bits};
     if (w.names && w.names.length) o.names = w.names;
+    if (w.source) o.source = w.source;
     return o;
   })});
 }
@@ -213,6 +215,22 @@ function addWatch() {
 $("b-watch-add").onclick = addWatch;
 $("watch-add").onkeydown = (e) => { if (e.key === "Enter") addWatch(); };
 $("b-watch-save").onclick = () => sendWatch(true);
+
+// ---------------------------------------------------------------------------
+// CSV 取込 (PLC のラベル / デバイスコメント)
+// ---------------------------------------------------------------------------
+$("b-import").onclick = () => $("f-import").click();
+$("f-import").onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  e.target.value = "";
+  const sys = confirm(`${f.name} を取り込みます。\n\nシステムデバイス (KV: CM/CR, 三菱: SM/SD) も取り込みますか?\n[OK]=取り込む  [キャンセル]=除外 (通常はこちら)`) ? 1 : 0;
+  const body = await f.arrayBuffer();
+  const r = await fetch(`/api/import?name=${encodeURIComponent(f.name)}&system=${sys}`, {method: "POST", body});
+  const j = await r.json();
+  if (!r.ok) { alert("取込失敗: " + (j.error || r.status) + (j.skipped ? "\n" + j.skipped.map(x => x.join(": ")).join("\n") : "")); return; }
+  const sk = (j.skipped || []).map(x => `${x[0]}: ${x[1]}`).join("\n");
+  alert(`取込完了\n  PLC→PC: ${j.out} 個\n  PC→PLC: ${j.in} 個\n  監視デバイス: ${j.watch} エントリ (${j.words} ワード)\n  保存: ${j.saved}` + (sk ? `\n\n除外:\n${sk}` : ""));
+};
 
 // ---------------------------------------------------------------------------
 // デバイス表示
@@ -333,6 +351,7 @@ function updateDevices() {
   const forcedWords = new Set(state.forces.words.map(f => `${f.block}.${f.word}`));
   for (const t of state.tags) {
     const key = tagKey(t);
+    if (state.hidden.has(key)) continue;
     const v = getVal(s, t);
     if (t.kind === "bit") {
       const c = dom.chips.get(key); if (!c) continue;
