@@ -75,6 +75,34 @@ objects:
   挙動を書かずに `tags` だけでも「デバイスモニタ + 手動強制」として使える。
 - PLC 側に入れる I/O 層（TWIN_MODE 切替）は [docs/plc_io_layer.md](docs/plc_io_layer.md)。
 
+## PLC のラベル（変数）やデバイスコメントから自動生成する
+
+`tags` を手で書かずに、PLC 側で付けた名前をそのまま取り込める。
+
+1. CSV を書き出す
+   - **GX Works3**: ナビゲーション → ラベル → グローバルラベル（またはプログラムのローカルラベル）を開き、
+     ラベルエディタ上で右クリック → **CSV 書き出し**。デバイスコメントは「デバイスコメント」画面から同じく CSV 書き出し。
+   - **KV STUDIO**: 変数（KV-8000）は「変数」ウィンドウ → **エクスポート**。デバイスコメントは「デバイスコメント編集」→ CSV 出力。
+2. 変換する
+
+```bash
+python -m twin.importer labels.csv --config configs/line_a.yaml
+# → configs/line_a.tags.yaml を生成 (tags.out / tags.in / watch)
+```
+
+3. `configs/line_a.yaml` に 1 行足す
+
+```yaml
+include: [line_a.tags.yaml]
+```
+
+ブロック内（DM1000〜 / DM1100〜）に割り付けたラベルは `tags.out` / `tags.in` に、
+それ以外（M、MR、D0〜 など）は `watch` に名前付きで入る。データ型（Bit / INT / DINT / UINT…）から bit / s16 / s32 / u16 を決める。
+ラベルを増やしたら CSV を書き出して同じコマンドを打ち直すだけ。
+
+注意: GX Works3 のローカルラベルや KV の変数で **デバイス割付なし（自動割付）** のものは通信で読めないため除外される（一覧に出る）。
+見たいラベルには割付デバイスを指定するか、グローバルラベルにして M/D を割り付ける。
+
 ## 開発の進め方（設計メモ §9）
 
 1. PLC に I/O 層と DM ブロックを入れ、TWIN_MODE で切り替わることを確認

@@ -176,7 +176,7 @@ def is_bit_device(plc_type: str, dev: str) -> bool:
 _REF_NUM = re.compile(r"^(out|in|watch)\.(\d+)$")
 _REF_WB = re.compile(r"^(out|in|watch)\.(\d+)\.(\d+)$")
 _REF_W = re.compile(r"^(out|in|watch)\.w(\d+)(?::(u16|s16|u32|s32))?$")
-_REF_NAME = re.compile(r"^(out|in|watch)\.([A-Za-z_][A-Za-z0-9_\-]*)$")
+_REF_NAME = re.compile(r"^(out|in|watch)\.(\S+)$")
 
 
 def resolve_ref(s: str, cfg: TwinConfig | None = None) -> Ref:
@@ -284,9 +284,35 @@ def sidecar_path(path: str) -> str:
     return base + ".watch.yaml"
 
 
+def _merge_include(raw: dict, base_dir: str) -> dict:
+    """include: [a.yaml, ...] の tags / watch / objects を取り込む (本体側が後ろに付く)。"""
+    incs = raw.get("include") or []
+    if isinstance(incs, str):
+        incs = [incs]
+    tags = {"out": [], "in": [], "watch": []}
+    watch: list = []
+    objects: list = []
+    for inc in incs:
+        p = inc if os.path.isabs(inc) else os.path.join(base_dir, inc)
+        if not os.path.isfile(p):
+            raise ValueError(f"include のファイルがありません: {p}")
+        with open(p, "r", encoding="utf-8") as f:
+            sub = yaml.safe_load(f) or {}
+        for b in tags:
+            tags[b] += list((sub.get("tags") or {}).get(b) or [])
+        watch += list(sub.get("watch") or [])
+        objects += list(sub.get("objects") or [])
+    own = raw.get("tags") or {}
+    raw["tags"] = {b: tags[b] + list(own.get(b) or []) for b in tags}
+    raw["watch"] = watch + list(raw.get("watch") or [])
+    raw["objects"] = objects + list(raw.get("objects") or [])
+    return raw
+
+
 def load_config(path: str) -> TwinConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+    raw = _merge_include(raw, os.path.dirname(os.path.abspath(path)))
     sc = sidecar_path(path)
     if os.path.isfile(sc):
         with open(sc, "r", encoding="utf-8") as f:
