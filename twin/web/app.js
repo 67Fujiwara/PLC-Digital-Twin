@@ -108,7 +108,9 @@ function setup(cfg) {
   for (const b of ["out", "in", "watch"]) for (const t of cfg.tags[b] || []) { state.tags.push(t); state.tagByKey.set(tagKey(t), t); }
   $("h-out").textContent = `${cfg.out.dev}${cfg.out.addr} × ${cfg.out.words}w`;
   $("h-in").textContent = `${cfg.in.dev}${cfg.in.addr} × ${cfg.in.words}w`;
-  $("h-watch").textContent = cfg.watch.map(w => `${w.dev}${w.addr}×${w.words}w`).join(", ") || "なし";
+  $("h-watch").textContent = cfg.watch.length > 6
+    ? `${cfg.watch.length} エントリ / ${cfg.watch_words} ワード`
+    : (cfg.watch.map(w => `${w.dev}${w.addr}×${w.words}w`).join(", ") || "なし");
   $("p-watch").classList.toggle("hidden", !cfg.watch.length);
   state.watchEntries = cfg.watch.map(w => ({dev: w.dev, addr: w.addr, words: w.words, names: w.names, bits: w.bits, source: w.source}));
   loadHidden();
