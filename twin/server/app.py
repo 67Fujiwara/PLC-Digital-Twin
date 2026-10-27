@@ -161,7 +161,7 @@ class TwinApp:
                 last_log = logs[-1]["t"]
             frame = {
                 "type": "frame",
-                "samples": new[-50:],
+                "samples": new[-max(50, int(interval * 1000 / max(0.5, self.cfg.cycle_ms) * 2)):],   # 短周期でも落とさない
                 "sim": latest["sim"],
                 "stat": latest["stat"],
                 "forces": latest["forces"],
