@@ -11,7 +11,7 @@ import threading
 import time
 from collections import deque
 
-from ..config import TwinConfig
+from ..config import TwinConfig, parse_config, save_watch
 from ..core.loop import run_loop
 from .http import WebServer, WSClient, Request
 
@@ -19,8 +19,10 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
 
 
 class TwinApp:
-    def __init__(self, cfg: TwinConfig, host: str = "0.0.0.0", port: int = 8080, fps: float = 30.0):
+    def __init__(self, cfg: TwinConfig, host: str = "0.0.0.0", port: int = 8080, fps: float = 30.0,
+                 config_path: str | None = None):
         self.cfg = cfg
+        self.config_path = config_path
         self.host, self.port, self.fps = host, port, fps
         self.server = WebServer(host, port, WEB_DIR)
         self.server.on_ws_connect = self._on_connect
@@ -99,6 +101,32 @@ class TwinApp:
             self.send_cmd(msg)
         elif t == "ping":
             await client.send_text(json.dumps({"type": "pong", "t": msg.get("t"), "server_time": time.time()}))
+        elif t == "set_watch":
+            await self._set_watch(client, msg.get("watch") or [], bool(msg.get("save")))
+
+    async def _set_watch(self, client: WSClient, watch: list, save: bool) -> None:
+        """監視デバイス一覧を差し替える (検証 -> ループへ通知 -> 全クライアントに hello 再送)。"""
+        raw = dict(self.cfg.raw)
+        raw["watch"] = watch
+        try:
+            new_cfg = parse_config(raw)
+        except Exception as e:  # noqa: BLE001
+            await client.send_text(json.dumps({"type": "error", "msg": f"監視デバイス設定エラー: {e}"}, ensure_ascii=False))
+            return
+        self.cfg = new_cfg
+        self.send_cmd({"type": "set_watch", "watch": watch})
+        msg = "監視デバイスを更新: " + (", ".join(f"{w['dev']}{w['addr']}x{w.get('words', 1)}" for w in watch) or "なし")
+        if save and self.config_path:
+            try:
+                sc = save_watch(self.config_path, watch)
+                msg += f"  (保存: {sc})"
+            except OSError as e:
+                msg += f"  (保存失敗: {e})"
+        with self.lock:
+            self.logs.append({"t": time.time(), "level": "info", "msg": msg})
+        print(f"[info] {msg}", flush=True)
+        hello = json.dumps({"type": "hello", "config": self.cfg.to_public(), "server_time": time.time()}, ensure_ascii=False)
+        await self.server.broadcast(hello)
 
     async def _broadcast_task(self) -> None:
         interval = 1.0 / self.fps

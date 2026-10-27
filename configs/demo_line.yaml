@@ -23,12 +23,19 @@ tags:
     - {name: ST1_UP,     bit: "0.2", comment: ストッパ上昇}
     - {name: CONV2_RUN,  bit: "0.3", comment: 搬出コンベヤ運転}
     - {name: AX1_START,  bit: "0.4", comment: 軸1 位置決め起動}
+    - {name: CAM_ACK,    bit: "0.5", comment: カメラ結果 受取り完了}
+    - {name: BLOW1,      bit: "2.0", comment: エアブロー 1連目 (Y 0〜75)}
+    - {name: BLOW2,      bit: "2.1", comment: エアブロー 2連目 (Y 75〜150)}
+    - {name: BLOW3,      bit: "2.2", comment: エアブロー 3連目 (Y 150〜225)}
+    - {name: BLOW4,      bit: "2.3", comment: エアブロー 4連目 (Y 225〜300)}
     - {name: AX1_TARGET, word: 10, type: s32, comment: 軸1 目標位置}
     - {name: WORK_COUNT, word: 12, comment: 通過ワーク数}
     - {name: REJECT_CNT, word: 13, comment: 排出数}
     - {name: SEQ_STEP,   word: 14, comment: シーケンス ステップ}
     - {name: SCAN_CNT,   word: 15, comment: スキャンカウンタ}
     - {name: INV_HZ,     word: 16, comment: インバータ周波数 x0.01Hz}
+    - {name: TRACK_N,    word: 17, comment: 追従中の NG 数}
+    - {name: BLOW_CNT,   word: 18, comment: エアブロー発射回数}
   in:    # PC -> PLC
     - {name: CYL1_END,   bit: "0.0", comment: 押出し 伸端}
     - {name: CYL1_HOME,  bit: "0.1", comment: 押出し 縮端}
@@ -36,17 +43,34 @@ tags:
     - {name: PE2,        bit: "0.3", comment: 光電 搬出側}
     - {name: AX1_BUSY,   bit: "0.4", comment: 軸1 動作中}
     - {name: AX1_INPOS,  bit: "0.5", comment: 軸1 インポジション}
+    - {name: CAM_DONE,   bit: "0.6", comment: カメラ 結果有効}
     - {name: ESTOP,      bit: "1.0", comment: 非常停止 (手動ON用)}
-    - {name: REJECT_ALL, bit: "1.1", comment: 全数排出モード (手動ON用)}
+    - {name: REJECT_ALL, bit: "1.1", comment: ON で PE1 到達ワークを押出し排出 (手動ON用)}
     - {name: AX1_POS,    word: 10, type: s32, comment: 軸1 現在位置}
-    - {name: CONV1_ENC,  word: 20, type: u32, comment: 供給コンベヤ エンコーダ}
+    - {name: CONV1_ENC,  word: 20, type: u32, comment: 供給コンベヤ エンコーダ (10pls/mm)}
+    - {name: CAM_ENC,    word: 22, type: u32, comment: 撮像時エンコーダ値}
+    - {name: CAM_COUNT,  word: 30, comment: NG 個数}
+    - {name: CAM_X1,     word: 32, type: s16, comment: NG1 X (mm, トリガ線基準)}
+    - {name: CAM_Y1,     word: 33, comment: NG1 Y (mm, エッジ基準)}
+    - {name: CAM_X2,     word: 34, type: s16, comment: NG2 X}
+    - {name: CAM_Y2,     word: 35, comment: NG2 Y}
+    - {name: CAM_X3,     word: 36, type: s16, comment: NG3 X}
+    - {name: CAM_Y3,     word: 37, comment: NG3 Y}
+    - {name: CAM_X4,     word: 38, type: s16, comment: NG4 X}
+    - {name: CAM_Y4,     word: 39, comment: NG4 Y}
 
 objects:
-  - {name: conv1, type: conveyor, run: out.CONV1_RUN, length: 2000, next: conv2,
+  - {name: conv1, type: conveyor, run: out.CONV1_RUN, length: 2000, width: 300, next: conv2,
      speed_ref: out.INV_HZ, rated_hz: 60, rated_speed: 300, accel: 0.5, decel: 0.3,
      encoder: in.CONV1_ENC, pulses_per_mm: 10}
   - {name: conv2, type: conveyor, run: out.CONV2_RUN, length: 1200, speed: 300}
-  - {name: supply, type: emitter, onto: conv1, every: 3.0, length: 60, max: 20, initial: 2}
+  - {name: supply, type: emitter, onto: conv1, every: 1.2, jitter: 0.8, length: 60, width: 60,
+     y: random, ng_rate: 0.35, max: 30, initial: 2}
+  # カメラ: トリガ線 600mm を中心に視野 300mm。ワーク前端が 600 を通過するたびに自動撮像し、50ms 後に NG の X,Y を出力
+  - {name: CAM1, type: camera, on: conv1, at: 600, fov: 300, delay: 0.05, slots: 4,
+     done: in.CAM_DONE, ack: out.CAM_ACK, count: in.CAM_COUNT, enc: in.CAM_ENC, results: in.w32}
+  # 4 連エアブロー: 1200mm 位置、幅 300 を 75mm ピッチで 4 分割 (有効帯 50mm)。out word2 の bit0〜3 が各ノズル
+  - {name: BLOW, type: airblow, on: conv1, at: 1200, nozzles: 4, blow: out.w2, band: 50, reach: 40}
   - {name: PE1, type: sensor, on: conv1, at: 1500, width: 10, output: in.PE1, delay: 0.01}
   - {name: ST1, type: stopper, on: conv1, at: 1560, up: out.ST1_UP, time: 0.1}
   - {name: CYL1, type: cylinder, extend: out.CYL1_EXT, stroke: 100, time: 0.4, retract_time: 0.3,

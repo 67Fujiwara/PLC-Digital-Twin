@@ -34,7 +34,7 @@ const estop = page.locator("#bits-in .chip", { hasText: "ESTOP" });
 await estop.locator(".sw").click();
 await page.waitForTimeout(400);
 const afterForce = await page.evaluate(() => ({
-  estop: document.querySelector("#bits-in .chip:nth-child(7)").className,
+  estop: [...document.querySelectorAll("#bits-in .chip")].find(c => c.textContent.includes("ESTOP")).className,
   conv1: document.querySelector("#bits-out .chip").className,
   release: document.getElementById("b-release").textContent,
 }));
@@ -59,6 +59,25 @@ await wrow.locator("td.val input").press("Enter");
 await page.waitForTimeout(600);
 console.log("watch write DM102:", await wrow.locator("td.val").textContent());
 // 波形停止・カーソル
+// 監視デバイスの追加 -> チップが増える -> 削除
+const nWatchBefore = await page.locator("#bits-watch .chip").count();
+await page.fill("#watch-add", "MR300 1");
+await page.press("#watch-add", "Enter");
+await page.waitForTimeout(800);
+const nWatchAfter = await page.locator("#bits-watch .chip").count();
+console.log("watch add:", nWatchBefore, "->", nWatchAfter, (await page.locator("#watch-list .we").allTextContents()).join(" | "));
+await page.locator("#watch-list .we", { hasText: "MR300" }).locator(".x").click();
+await page.waitForTimeout(800);
+console.log("watch remove:", await page.locator("#bits-watch .chip").count());
+// 表示設定: PE2 を非表示にして戻す
+await page.click("#b-visible");
+await page.fill("#vis-filter", "PE2");
+await page.locator("#vis-list label", { hasText: "PE2" }).locator("input").uncheck();
+await page.click("#vis-close");
+console.log("PE2 hidden:", await page.locator("#bits-in .chip", { hasText: "PE2" }).first().getAttribute("class"));
+await page.click("#b-visible"); await page.fill("#vis-filter", "PE2");
+await page.locator("#vis-list label", { hasText: "PE2" }).locator("input").check(); await page.click("#vis-close");
+console.log("line header:", await page.locator("#h-line").textContent());
 await page.mouse.move(900, 700); await page.waitForTimeout(200);
 const scroll = await page.evaluate(() => [...document.querySelectorAll(".panel")].map(p => p.scrollWidth - p.clientWidth).filter(d => d > 0));
 console.log("panel overflow px:", JSON.stringify(scroll));

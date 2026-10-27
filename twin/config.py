@@ -19,6 +19,7 @@ YAML構造 (抜粋):
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field, asdict
 from typing import Any
@@ -277,10 +278,30 @@ def _parse_block(d: Any, default_dev: str, default_addr: int) -> BlockSpec:
                      int(d.get("words", 64)))
 
 
+def sidecar_path(path: str) -> str:
+    """画面から編集した監視デバイスの保存先: <設定名>.watch.yaml"""
+    base, _ = os.path.splitext(path)
+    return base + ".watch.yaml"
+
+
 def load_config(path: str) -> TwinConfig:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+    sc = sidecar_path(path)
+    if os.path.isfile(sc):
+        with open(sc, "r", encoding="utf-8") as f:
+            side = yaml.safe_load(f) or {}
+        if isinstance(side, dict) and "watch" in side:
+            raw["watch"] = side["watch"]
     return parse_config(raw)
+
+
+def save_watch(path: str, watch: list) -> str:
+    sc = sidecar_path(path)
+    with open(sc, "w", encoding="utf-8") as f:
+        f.write("# 画面 (監視デバイス) から保存した追加監視。元の YAML の watch より優先される。\n")
+        yaml.safe_dump({"watch": watch}, f, allow_unicode=True, sort_keys=False)
+    return sc
 
 
 def parse_config(raw: dict) -> TwinConfig:

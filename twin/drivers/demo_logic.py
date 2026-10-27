@@ -12,12 +12,25 @@ class Logic:
     def __init__(self) -> None:
         self.t = 0.0
         self.step = 0          # 0:待機 1:押出し 2:押出し保持 3:戻り 4:ストッパ解放
+        # 押出しシリンダは REJECT_ALL (in.1.1) ON のときだけ動く。NG 排出はカメラ + エアブローが担う
         self.timer = 0.0
         self.count = 0
         self.reject = 0
         self.ax_step = 0
         self.ax_timer = 0.0
         self.scan_count = 0
+        # --- カメラ追従排出 (実機ラダーの手本) ---
+        self.CAM_AT = 600.0        # カメラ トリガ線位置 mm (YAML の camera.at と一致させる)
+        self.BLOW_AT = 1200.0      # エアブロー位置 mm (airblow.at)
+        self.PPM = 10.0            # エンコーダ pulses/mm (conveyor.pulses_per_mm)
+        self.PITCH = 75.0          # ノズルピッチ mm (幅 300 / 4 連)
+        self.NOZZLES = 4
+        self.BLOW_TIME = 0.10      # 吹付け時間 s
+        self.LEAD = 15.0           # 先行量 mm (ブロー立上り遅れ分)
+        self.track: list[dict] = []   # 追従テーブル {x, y, enc}
+        self.blow_timer = [0.0] * self.NOZZLES
+        self.prev_done = False
+        self.blow_count = 0
 
     def scan(self, mem, dt: float) -> None:
         self.t += dt
@@ -42,7 +55,7 @@ class Logic:
         if self.step == 0:
             if pe1 and cyl_home and run:
                 self.count += 1
-                if reject_mode or (self.count % 3 == 0):
+                if reject_mode:
                     self.step = 1
                 else:
                     self.step = 4
@@ -93,6 +106,40 @@ class Logic:
             if not pe2 or self.ax_timer > 2.0:
                 self.ax_step = 0
         mem.set_bit("DM", OUT + 0, 4, ax_start)            # AX1_START
+        # ---- カメラ結果の受取り → 追従テーブルへ登録 ------------------------
+        cam_done = mem.bit("DM", IN + 0, 6)
+        ack = False
+        if cam_done and not self.prev_done:
+            n = mem.word("DM", IN + 30)
+            enc0 = mem.word("DM", IN + 22) | (mem.word("DM", IN + 23) << 16)
+            for i in range(min(n, 4)):
+                x = mem.word("DM", IN + 32 + 2 * i)
+                x = x - 0x10000 if x & 0x8000 else x
+                y = mem.word("DM", IN + 33 + 2 * i)
+                self.track.append({"x": x, "y": y, "enc": enc0})
+            ack = True                       # 受取り完了 (1 スキャンだけ ON)
+        self.prev_done = cam_done
+        mem.set_bit("DM", OUT + 0, 5, ack)                 # CAM_ACK
+        # ---- 追従: 現在位置 = CAM_AT + X + (エンコーダ差 / PPM) → ブロー位置で該当ノズルを吹く ----
+        enc_now = mem.word("DM", IN + 20) | (mem.word("DM", IN + 21) << 16)
+        for t in list(self.track):
+            travel = ((enc_now - t["enc"]) & 0xFFFF_FFFF) / self.PPM
+            pos = self.CAM_AT + t["x"] + travel
+            if pos >= self.BLOW_AT - self.LEAD:
+                k = min(self.NOZZLES - 1, max(0, int(t["y"] // self.PITCH)))
+                self.blow_timer[k] = self.BLOW_TIME
+                self.blow_count += 1
+                self.track.remove(t)
+            elif travel > 3000:              # 異常: 流れ過ぎたら破棄
+                self.track.remove(t)
+        blow_word = 0
+        for k in range(self.NOZZLES):
+            if self.blow_timer[k] > 0 and run:
+                blow_word |= 1 << k
+                self.blow_timer[k] -= dt
+        mem.set_word("DM", OUT + 2, blow_word)             # BLOW1〜4
+        mem.set_word("DM", OUT + 17, len(self.track))      # TRACK_N
+        mem.set_word("DM", OUT + 18, self.blow_count)      # BLOW_CNT
         # ---- 監視数値 -----------------------------------------------------
         mem.set_word("DM", OUT + 12, self.count)           # WORK_COUNT
         mem.set_word("DM", OUT + 13, self.reject)          # REJECT_COUNT

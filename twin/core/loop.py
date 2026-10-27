@@ -96,6 +96,14 @@ class LoopState:
                 o.emit(self.world)  # type: ignore[attr-defined]
         elif t == "remove_works":
             self.world.works.clear()
+        elif t == "set_watch":
+            raw = dict(self.cfg.raw)
+            raw["watch"] = list(cmd.get("watch") or [])
+            cfg = parse_config(raw)
+            self.cfg = cfg
+            self.watch = [0] * cfg.watch_words
+            self.io = IOBus(self.out, self.inp_sim, self.watch)
+            self.io_plc = IOBus(self.out, self.inp, self.watch)
 
     def _watch_addr(self, w, off: int) -> int:
         # キーエンスのリレーは ch 番号が 100 刻み
@@ -137,8 +145,6 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
     last_t = next_t
     reconnect_at = 0.0
     read_ms = write_ms = step_ms = 0.0
-    watch_spec = cfg.watch
-    # watch の各エントリの PLC 先頭番号 (キーエンス MR は ch*100)
     cycle = 0
     while not stop_event.is_set():
         next_t += period
@@ -182,8 +188,8 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
         try:
             vals = drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
             st.out[:] = vals
-            if watch_spec and cycle % cfg.watch_every == 0:
-                for w in watch_spec:
+            if st.cfg.watch and cycle % st.cfg.watch_every == 0:
+                for w in st.cfg.watch:
                     v = drv.read_words(w.dev, w.addr, w.words)
                     st.watch[w.offset:w.offset + w.words] = v
         except DriverError as e:

@@ -28,6 +28,7 @@
       <option value="2">2s</option><option value="5">5s</option><option value="10" selected>10s</option>
       <option value="30">30s</option><option value="60">60s</option><option value="120">120s</option>
     </select>
+    <button id="b-visible" title="表示するデバイスを選ぶ">表示設定</button>
     <button id="b-release" title="ブラウザからの強制をすべて解除">強制解除</button>
     <button id="b-simreset" title="シミュレーションを初期状態に戻す">Sim リセット</button>
     <button id="b-simtoggle" title="挙動シミュレーションの実行/停止">Sim 停止</button>
@@ -48,7 +49,13 @@
       <table class="words" id="words-in"></table>
     </div>
     <div class="panel" id="p-watch">
-      <h2>監視デバイス <span class="sub" id="h-watch"></span></h2>
+      <h2>監視デバイス <span class="sub" id="h-watch"></span>
+        <span class="right">
+          <input id="watch-add" placeholder="例: DM100 8 / MR200 2 / D0-D15" title="デバイス 先頭 [ワード数]  または  先頭-末尾。Enter で追加">
+          <button id="b-watch-add" class="small">追加</button>
+          <button id="b-watch-save" class="small" title="設定ファイルの隣 (<名前>.watch.yaml) に保存し、次回起動時も読む">保存</button>
+        </span></h2>
+      <div id="watch-list" class="wlist"></div>
       <div class="bits" id="bits-watch"></div>
       <table class="words" id="words-watch"></table>
     </div>
@@ -90,6 +97,13 @@
     </div>
   </section>
 </main>
+<div id="modal" class="hidden">
+  <div class="mbox">
+    <h3>表示するデバイス <span class="right"><input id="vis-filter" placeholder="絞込み"> <button id="vis-all" class="small">全て</button> <button id="vis-none" class="small">なし</button> <button id="vis-close" class="small">閉じる</button></span></h3>
+    <p class="dim">チェックを外したデバイスはパネルに表示されません (記録・波形追加は可能)。設定はこのブラウザに保存されます。</p>
+    <div id="vis-list"></div>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>

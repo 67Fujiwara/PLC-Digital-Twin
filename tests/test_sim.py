@@ -71,6 +71,17 @@ def test_conveyor_stop_when_run_off_and_stopper():
     assert w.pos > 1100 and not w.blocked
 
 
+def test_side_by_side_works_do_not_block():
+    cfg, world, io, out, inp = make([
+        {"name": "c1", "type": "conveyor", "run": "out.RUN", "length": 3000, "width": 300, "speed": 300},
+    ])
+    a = world.spawn("c1", 500, 50, y=50)
+    b = world.spawn("c1", 480, 50, y=200)   # X は重なるが Y は離れている -> 並走できる
+    out[0] = 1
+    run(world, io, 1.0)
+    assert abs(a.pos - 800) < 1e-6 and abs(b.pos - 780) < 1e-6 and not b.blocked
+
+
 def test_workpieces_do_not_overlap():
     cfg, world, io, out, inp = make([
         {"name": "c1", "type": "conveyor", "run": "out.RUN", "length": 3000, "speed": 300},
@@ -178,3 +189,100 @@ def test_sensor_delay_and_invert():
     assert io.get(ref) == 1         # 遅れ中
     run(world, io, 0.03)
     assert io.get(ref) == 0
+
+
+def make2(objects, tags_in_extra):
+    tags = {"out": [{"name": "RUN", "bit": "0.0"}, {"name": "TRIG", "bit": "0.1"}, {"name": "ACK", "bit": "0.2"},
+                    {"name": "BLOW", "word": 2}],
+            "in": [{"name": "DONE", "bit": "0.0"}, {"name": "COUNT", "word": 30}, {"name": "ENC", "word": 20, "type": "u32"},
+                   {"name": "CENC", "word": 22, "type": "u32"}] + tags_in_extra}
+    cfg = parse_config({"plc": {"type": "mock"}, "tags": tags, "objects": objects, "seed": 3})
+    world = World(cfg)
+    out, inp = [0] * 64, [0] * 64
+    return cfg, world, IOBus(out, inp, []), out, inp
+
+
+def test_camera_outputs_ng_xy_and_handshake():
+    cfg, world, io, out, inp = make2([
+        {"name": "c1", "type": "conveyor", "run": "out.RUN", "length": 2000, "width": 300, "speed": 300, "encoder": "in.ENC"},
+        {"name": "cam", "type": "camera", "on": "c1", "at": 600, "fov": 300, "delay": 0.05, "slots": 4,
+         "done": "in.DONE", "ack": "out.ACK", "count": "in.COUNT", "enc": "in.CENC", "results": "in.w32"},
+    ], [])
+    # 視野内に OK 1 個, NG 2 個 (y 違い)。前端が 600 を通過した瞬間に撮像
+    ok = world.spawn("c1", 580, 50, y=150, ng=False)
+    ng1 = world.spawn("c1", 500, 50, y=40, ng=True)
+    ng2 = world.spawn("c1", 460, 50, y=250, ng=True)
+    out[0] = 1
+    run(world, io, 0.10)        # ok 前端 580 -> 610 で通過 -> 撮像 (t≈0.07)
+    assert world.by_name["cam"].captures == 1
+    run(world, io, 0.06)        # delay 50ms 後に出力
+    assert io.get(cfg.tag("in", "DONE").ref) == 1
+    assert io.get(cfg.tag("in", "COUNT").ref) == 2
+    from twin.config import Ref
+    x1 = io.get(Ref("in", "word", 32, 0, "s16")); y1 = io.get(Ref("in", "word", 33))
+    x2 = io.get(Ref("in", "word", 34, 0, "s16")); y2 = io.get(Ref("in", "word", 35))
+    # 撮像時 (t≈0.07) ng1 中心 = 500+21-25 ≈ 496 -> X ≈ -104, ng2 中心 ≈ 456 -> X ≈ -144
+    assert -110 <= x1 <= -98 and y1 == 40
+    assert -150 <= x2 <= -138 and y2 == 250
+    assert io.get(cfg.tag("in", "CENC").ref) > 0
+    # ack するまで done 保持。その間に ng1/ng2 もトリガ線を通過して撮像されるが、結果はキューで待つ
+    run(world, io, 0.5)
+    assert io.get(cfg.tag("in", "DONE").ref) == 1 and io.get(cfg.tag("in", "COUNT").ref) == 2
+    cam = world.by_name["cam"]
+    assert cam.captures == 3 and len(cam.pending) == 2
+    out[0] |= 0b100                      # ack 立上り -> done OFF -> 次の結果 (報告済みなので NG 0 個) が出る
+    run(world, io, 0.02)
+    assert io.get(cfg.tag("in", "DONE").ref) == 1 and io.get(cfg.tag("in", "COUNT").ref) == 0
+    out[0] &= ~0b100
+    run(world, io, 0.01)
+    out[0] |= 0b100
+    run(world, io, 0.02)
+    out[0] &= ~0b100
+    run(world, io, 0.01)
+    out[0] |= 0b100
+    run(world, io, 0.05)
+    assert io.get(cfg.tag("in", "DONE").ref) == 0 and len(cam.pending) == 0
+    # 同じワークは二度報告されない
+    assert ng1.reported and ng2.reported and ok.reported
+
+
+def test_airblow_ejects_only_matching_nozzle():
+    cfg, world, io, out, inp = make2([
+        {"name": "c1", "type": "conveyor", "run": "out.RUN", "length": 2000, "width": 300, "speed": 300},
+        {"name": "blow", "type": "airblow", "on": "c1", "at": 1000, "nozzles": 4, "blow": "out.BLOW", "reach": 60},
+    ], [])
+    ng = world.spawn("c1", 1020, 40, y=40, ng=True)     # 中心 1000, Y 40 -> ノズル1
+    ok = world.spawn("c1", 1020, 40, y=260, ng=False)   # 同じ X, Y 260 -> ノズル4
+    out[2] = 0b0001                                     # ノズル1 だけ
+    run(world, io, 0.01)
+    assert ng not in world.works and ok in world.works
+    assert world.stats == {"ng_total": 0, "ng_ejected": 1, "ok_ejected": 0, "ng_passed": 0, "ok_passed": 0}
+    out[2] = 0b1000
+    run(world, io, 0.01)
+    assert ok not in world.works and world.stats["ok_ejected"] == 1
+
+
+def test_demo_line_tracking_rejects_ng():
+    """デモ設定 + デモロジック (モックPLC) を 40 秒回し、NG が排出され OK が通過することを確認。"""
+    import os
+    from twin.config import load_config
+    from twin.drivers.mock import MockPLC
+    cfg = load_config(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "demo_line.yaml"))
+    world = World(cfg)
+    out, inp, watch = [0] * 64, [0] * 64, [0] * cfg.watch_words
+    io = IOBus(out, inp, watch)
+    plc = MockPLC(logic="twin.drivers.demo_logic")
+    plc.connect()
+    plc._last = None
+    for _ in range(4000):
+        # PLC スキャン (dt 固定 10ms)
+        plc.logic.scan(plc.mem, 0.01)
+        out[:] = plc.mem.words("DM", 1000, 64)
+        world.step(0.01, io)
+        plc.mem.set_words("DM", 1100, inp)
+    st = world.stats
+    assert st["ng_total"] >= 5
+    assert st["ng_ejected"] >= st["ng_total"] - 3          # 流れ途中の分を除きほぼ全数排出
+    assert st["ng_passed"] == 0
+    assert st["ok_ejected"] <= 2          # 隣接ワークへの巻き込み (ノズル帯 75mm に対しワーク幅 60mm)
+    assert st["ok_passed"] >= 5

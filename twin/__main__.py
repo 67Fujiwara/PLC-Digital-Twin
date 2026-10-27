@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     from .server.app import TwinApp
-    app = TwinApp(cfg, args.host, args.port, args.fps)
+    app = TwinApp(cfg, args.host, args.port, args.fps, config_path=args.config)
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{args.port}/")).start()
     try:

@@ -20,6 +20,8 @@ const state = {
   wsFps: 0, wsCount: 0, latency: 0,
   changedAt: new Map(), // key -> 最終変化時刻
   cursorX: null,
+  hidden: new Set(),    // 非表示タグ (tag key)
+  watchEntries: [],     // 監視デバイス一覧 (編集用)
 };
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,7 @@ function pingLoop() {
 
 function onMessage(m) {
   if (m.type === "hello") { setup(m.config); return; }
+  if (m.type === "error") { addLog({t: Date.now() / 1000, level: "error", msg: m.msg}); alert(m.msg); return; }
   if (m.type === "pong") { state.latency = performance.now() - m.t; return; }
   if (m.type === "history") { for (const s of m.samples) pushSample(s, false); state.prev = state.latest; return; }
   if (m.type !== "frame") return;
@@ -95,6 +98,7 @@ function pushSample(s, detect) {
 // 初期化 (hello 受信時)
 // ---------------------------------------------------------------------------
 function setup(cfg) {
+  const rehello = !!state.cfg;
   state.cfg = cfg;
   document.title = cfg.title;
   $("title").textContent = cfg.title;
@@ -106,13 +110,109 @@ function setup(cfg) {
   $("h-in").textContent = `${cfg.in.dev}${cfg.in.addr} × ${cfg.in.words}w`;
   $("h-watch").textContent = cfg.watch.map(w => `${w.dev}${w.addr}×${w.words}w`).join(", ") || "なし";
   $("p-watch").classList.toggle("hidden", !cfg.watch.length);
+  state.watchEntries = cfg.watch.map(w => ({dev: w.dev, addr: w.addr, words: w.words, names: w.names, bits: w.bits}));
+  loadHidden();
   buildDevices();
   buildRaw();
   buildLineButtons();
+  buildWatchList();
   loadWave();
-  state.samples = []; state.latest = null; state.prev = null;
+  if (!rehello) { state.samples = []; state.latest = null; state.prev = null; }
+  else state.wave = state.wave.filter(k => state.tagByKey.has(k));
   $("status").textContent = "";
 }
+
+// ---------------------------------------------------------------------------
+// 表示設定 (非表示タグ)
+// ---------------------------------------------------------------------------
+function loadHidden() {
+  try { state.hidden = new Set(JSON.parse(localStorage.getItem("twin.hidden." + state.cfg.title) || "[]")); } catch (e) { state.hidden = new Set(); }
+}
+function saveHidden() { try { localStorage.setItem("twin.hidden." + state.cfg.title, JSON.stringify([...state.hidden])); } catch (e) { /* ignore */ } }
+function applyHidden() {
+  for (const t of state.tags) {
+    const key = tagKey(t), hid = state.hidden.has(key);
+    const c = dom.chips.get(key); if (c) c.classList.toggle("hidden", hid);
+    const r = dom.rows.get(key); if (r) r.tr.classList.toggle("hidden", hid);
+  }
+}
+function openVisible() {
+  const list = $("vis-list"); list.innerHTML = "";
+  const f = $("vis-filter").value.trim().toLowerCase();
+  for (const b of ["out", "in", "watch"]) {
+    const tags = (state.cfg.tags[b] || []).filter(t => !f || t.name.toLowerCase().includes(f) || t.address.toLowerCase().includes(f));
+    if (!tags.length) continue;
+    list.appendChild(el("h4", null, b === "out" ? "PLC → PC" : b === "in" ? "PC → PLC" : "監視デバイス"));
+    for (const t of tags) {
+      const key = tagKey(t);
+      const lb = el("label"); const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !state.hidden.has(key);
+      cb.onchange = () => { cb.checked ? state.hidden.delete(key) : state.hidden.add(key); saveHidden(); applyHidden(); };
+      lb.appendChild(cb); lb.appendChild(el("span", null, t.name)); lb.appendChild(el("span", "ad", t.address));
+      list.appendChild(lb);
+    }
+  }
+  $("modal").classList.remove("hidden");
+}
+$("b-visible").onclick = openVisible;
+$("vis-close").onclick = () => $("modal").classList.add("hidden");
+$("modal").onclick = (e) => { if (e.target.id === "modal") $("modal").classList.add("hidden"); };
+$("vis-filter").oninput = openVisible;
+$("vis-all").onclick = () => { state.hidden.clear(); saveHidden(); applyHidden(); openVisible(); };
+$("vis-none").onclick = () => { for (const t of state.tags) state.hidden.add(tagKey(t)); saveHidden(); applyHidden(); openVisible(); };
+
+// ---------------------------------------------------------------------------
+// 監視デバイスの編集 (画面から追加/削除/保存)
+// ---------------------------------------------------------------------------
+function buildWatchList() {
+  const box = $("watch-list"); box.innerHTML = "";
+  state.watchEntries.forEach((w, i) => {
+    const d = el("span", "we", `${w.dev}${w.addr} ×${w.words}${w.bits ? " (bit)" : ""}`);
+    const x = el("span", "x", "✕"); x.title = "削除";
+    x.onclick = () => { state.watchEntries.splice(i, 1); sendWatch(false); };
+    d.appendChild(x); box.appendChild(d);
+  });
+  if (!state.watchEntries.length) box.appendChild(el("span", "dim", "監視デバイスなし。右上の欄に DM100 8 のように入力して追加"));
+}
+function parseWatch(text) {
+  // "DM100 8" / "DM100" / "D0-D15" / "MR200 2" / "X10-X1F" (16進デバイス)
+  const t = text.trim().toUpperCase();
+  let m = t.match(/^([A-Z]+)([0-9A-F]+)\s*[-〜~]\s*(?:[A-Z]+)?([0-9A-F]+)$/);
+  const hexDev = (d) => state.cfg.plc.type === "melsec" ? ["X", "Y", "B", "SB", "W", "SW", "ZR", "DX", "DY"].includes(d)
+                       : state.cfg.plc.type === "keyence" ? d === "B" : false;
+  const bitDev = (d) => state.cfg.plc.type === "melsec" ? ["X", "Y", "M", "L", "F", "V", "B", "S", "SM", "SB"].includes(d)
+                       : ["MR", "R", "LR", "CR", "VB", "B", "M", "X", "Y"].includes(d);
+  if (m) {
+    const dev = m[1], a = parseInt(m[2], hexDev(dev) ? 16 : 10), b = parseInt(m[3], hexDev(dev) ? 16 : 10);
+    if (Number.isNaN(a) || Number.isNaN(b) || b < a) return null;
+    const isBit = bitDev(dev);
+    const per = isBit ? (state.cfg.plc.type === "keyence" && dev !== "B" ? 100 : 16) : 1;
+    return {dev, addr: a, words: Math.max(1, Math.floor((b - a) / per) + 1), bits: isBit};
+  }
+  m = t.match(/^([A-Z]+)([0-9A-F]+)(?:\s+(\d+))?$/);
+  if (!m) return null;
+  const dev = m[1], addr = parseInt(m[2], hexDev(dev) ? 16 : 10);
+  if (Number.isNaN(addr)) return null;
+  return {dev, addr, words: Math.max(1, parseInt(m[3] || "1", 10)), bits: bitDev(dev)};
+}
+function sendWatch(save) {
+  send({type: "set_watch", save, watch: state.watchEntries.map(w => {
+    const o = {dev: w.dev, addr: w.addr, words: w.words, bits: w.bits};
+    if (w.names && w.names.length) o.names = w.names;
+    return o;
+  })});
+}
+function addWatch() {
+  const inp = $("watch-add");
+  const w = parseWatch(inp.value);
+  if (!w) { alert("書式: DM100 8  /  MR200 2  /  D0-D15  (デバイス 先頭 [ワード数] または 先頭-末尾)"); return; }
+  if (w.words > 64) { alert("1 エントリは 64 ワードまでにしてください"); return; }
+  state.watchEntries.push(w);
+  inp.value = "";
+  sendWatch(false);
+}
+$("b-watch-add").onclick = addWatch;
+$("watch-add").onkeydown = (e) => { if (e.key === "Enter") addWatch(); };
+$("b-watch-save").onclick = () => sendWatch(true);
 
 // ---------------------------------------------------------------------------
 // デバイス表示
@@ -120,6 +220,7 @@ function setup(cfg) {
 const dom = {chips: new Map(), rows: new Map(), raw: {out: [], in: []}};
 
 function buildDevices() {
+  dom.chips.clear(); dom.rows.clear();
   for (const b of ["out", "in", "watch"]) {
     const bits = $(`bits-${b}`), words = $(`words-${b}`);
     bits.innerHTML = ""; words.innerHTML = "";
@@ -128,6 +229,7 @@ function buildDevices() {
       else words.appendChild(makeRow(t));
     }
   }
+  applyHidden();
 }
 
 function makeChip(t) {
@@ -297,15 +399,16 @@ function updateHeader(m) {
   const ok = st.status === "connected" && m.loop_alive;
   $("led").className = "led " + (ok ? "ok" : "");
   $("status").textContent = ok ? (st.sim_enabled ? "" : "Sim 停止中") : (st.error || st.status || "");
-  $("s-period").textContent = (st.period_ms ?? 0).toFixed(2);
+  const fx = (v, d, w) => (v ?? 0).toFixed(d).padStart(w, " ");
+  $("s-period").textContent = fx(st.period_ms, 2, 5);
   const j = st.jitter || {};
-  $("s-jit").textContent = `${(j.avg ?? 0).toFixed(2)} / ${(j.p99 ?? 0).toFixed(2)} / ${(j.max_all ?? 0).toFixed(1)}`;
-  $("s-rw").textContent = `${(st.read_ms ?? 0).toFixed(2)} / ${(st.step_ms ?? 0).toFixed(2)} / ${(st.write_ms ?? 0).toFixed(2)}`;
-  $("s-lat").textContent = state.latency.toFixed(0);
-  $("s-rec").textContent = (state.samples.length * state.cfg.cycle_ms / 1000).toFixed(0);
+  $("s-jit").textContent = `${fx(j.avg, 2, 5)} / ${fx(j.p99, 2, 5)} / ${fx(j.max_all, 1, 5)}`;
+  $("s-rw").textContent = `${fx(st.read_ms, 2, 5)} / ${fx(st.step_ms, 2, 5)} / ${fx(st.write_ms, 2, 5)}`;
+  $("s-lat").textContent = fx(state.latency, 0, 4);
+  $("s-rec").textContent = fx(state.samples.length * state.cfg.cycle_ms / 1000, 0, 3);
   fpsCount++;
   const now = performance.now();
-  if (now - fpsLast > 1000) { state.wsFps = fpsCount * 1000 / (now - fpsLast); fpsCount = 0; fpsLast = now; $("s-fps").textContent = state.wsFps.toFixed(0); }
+  if (now - fpsLast > 1000) { state.wsFps = fpsCount * 1000 / (now - fpsLast); fpsCount = 0; fpsLast = now; $("s-fps").textContent = state.wsFps.toFixed(0).padStart(2, " "); }
   $("b-simtoggle").textContent = st.sim_enabled ? "Sim 停止" : "Sim 再開";
   $("b-simtoggle").classList.toggle("active", st.sim_enabled === false);
   const nf = state.forces.bits.length + state.forces.words.length;
@@ -517,63 +620,101 @@ function drawLine() {
   const convs = objs.filter(o => o.type === "conveyor");
   const cyls = objs.filter(o => o.type === "cylinder");
   const axes = objs.filter(o => o.type === "axis");
-  const rows = convs.length + cyls.length + axes.length;
-  const ROW = 64;
-  const [ctx, W, H] = resizeCanvas(lineCv, Math.max(90, rows * ROW + 16));
+  const W0 = lineCv.clientWidth || lineCv.parentElement.clientWidth;
+  const X0 = 110, PW = W0 - X0 - 20;
+  const maxLen = Math.max(1, ...convs.map(c => c.length));
+  const sx = PW / maxLen;                                   // mm -> px (X)
+  const beltH = (c) => Math.max(26, Math.min(120, (c.width || 300) * sx));
+  const rowOf = (c) => beltH(c) + 54;
+  const total = convs.reduce((a, c) => a + rowOf(c), 0) + (cyls.length + axes.length) * 64 + 16;
+  const [ctx, W, H] = resizeCanvas(lineCv, Math.max(90, total));
   ctx.clearRect(0, 0, W, H);
   if (!sim) { ctx.fillStyle = "#555"; ctx.fillText("ライン: データ待ち", 10, 20); return; }
-  $("h-line").textContent = `ワーク ${sim.works.length}  t=${sim.t.toFixed(1)}s`;
-  const maxLen = Math.max(1, ...convs.map(c => c.length));
-  const X0 = 110, PW = W - X0 - 20;
-  const sx = PW / maxLen;
+  const st = sim.stats || {};
+  $("h-line").textContent = `ワーク ${sim.works.length}  NG 排出 ${st.ng_ejected ?? 0}/${st.ng_total ?? 0}  誤排出 ${st.ok_ejected ?? 0}  見逃し ${st.ng_passed ?? 0}  t=${sim.t.toFixed(1)}s`;
   ctx.font = "11px system-ui, sans-serif"; ctx.textBaseline = "middle";
-  let y = 12;
-  const byName = Object.fromEntries(objs.map(o => [o.name, o]));
+  let y = 10;
   for (const c of convs) {
-    const yc = y + ROW / 2;
+    const bh = beltH(c), sy = bh / (c.width || 300);        // mm -> px (Y)
+    const top = y + 30, yc = top + bh / 2, len = c.length * sx;
+    const px = (mm) => X0 + mm * sx, py = (mm) => top + mm * sy;
     ctx.fillStyle = "#aab4c3"; ctx.font = "bold 12px system-ui"; ctx.fillText(c.name, 8, yc - 8);
     ctx.fillStyle = "#6b7684"; ctx.font = "10px ui-monospace"; ctx.fillText(`${c.v.toFixed(0)} mm/s${c.next ? " → " + c.next : ""}`, 8, yc + 8);
+    ctx.fillText(`W${c.width || 300}`, 8, yc + 20);
     // ベルト
-    const len = c.length * sx;
-    ctx.fillStyle = c.running ? "#2a3a4e" : "#232a34"; ctx.fillRect(X0, yc - 10, len, 20);
-    ctx.strokeStyle = c.running ? "#4da3ff" : "#3a4452"; ctx.strokeRect(X0 + .5, yc - 10.5, len, 20);
-    if (c.running) {   // 流れの縞
-      ctx.strokeStyle = "rgba(77,163,255,.25)";
+    ctx.fillStyle = c.running ? "#243244" : "#1e242d"; ctx.fillRect(X0, top, len, bh);
+    ctx.strokeStyle = c.running ? "#4da3ff" : "#3a4452"; ctx.strokeRect(X0 + .5, top + .5, len, bh);
+    if (c.running) {
+      ctx.strokeStyle = "rgba(77,163,255,.18)";
       const off = ((sim.t * c.v) % 40) * sx;
-      for (let x = X0 + off; x < X0 + len; x += 40 * sx) { ctx.beginPath(); ctx.moveTo(x, yc - 10); ctx.lineTo(x, yc + 10); ctx.stroke(); }
+      for (let x = X0 + off; x < X0 + len; x += 40 * sx) { ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + bh); ctx.stroke(); }
     }
     ctx.fillStyle = "#55606f"; ctx.font = "9px ui-monospace";
-    ctx.fillText("0", X0, yc + 19); ctx.fillText(`${c.length}`, X0 + len - 20, yc + 19);
+    ctx.fillText("0", X0, top + bh + 8); ctx.fillText(`${c.length}`, X0 + len - 22, top + bh + 8);
+    ctx.fillText("Y0", X0 - 14, top + 4); ctx.fillText(`${c.width || 300}`, X0 - 22, top + bh - 4);
+    // カメラ視野
+    for (const o of objs) {
+      if (o.type !== "camera" || o.conv !== c.name) continue;
+      const x1 = px(o.at - o.fov / 2), x2 = px(o.at + o.fov / 2);
+      ctx.fillStyle = o.flash ? "rgba(120,220,255,.35)" : "rgba(120,220,255,.08)"; ctx.fillRect(x1, top, x2 - x1, bh);
+      ctx.setLineDash([4, 3]); ctx.strokeStyle = "#78dcff"; ctx.strokeRect(x1 + .5, top + .5, x2 - x1, bh); ctx.setLineDash([]);
+      ctx.strokeStyle = o.done ? "#ffd35c" : "#78dcff"; ctx.beginPath(); ctx.moveTo(px(o.at), top - 6); ctx.lineTo(px(o.at), top + bh + 6); ctx.stroke();
+      ctx.fillStyle = "#78dcff"; ctx.font = "10px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(`📷 ${o.name} (${o.captures})${o.done ? " DONE" : ""}${o.queued ? " +" + o.queued : ""}`, px(o.at), top - 14);
+      ctx.textAlign = "left";
+      if (o.last && o.last.length) { ctx.fillStyle = "#ffd35c"; ctx.font = "9px ui-monospace"; ctx.fillText(o.last.map(r => `(${r[0]},${r[1]})`).join(" "), x1, top + bh + 20); }
+    }
+    // エアブロー
+    for (const o of objs) {
+      if (o.type !== "airblow" || o.conv !== c.name) continue;
+      const n = o.nozzles, pitch = (c.width || 300) / n;
+      ctx.fillStyle = "#9aa5b5"; ctx.font = "10px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(`${o.name} ×${n} (${o.fired})`, px(o.at), top - 14); ctx.textAlign = "left";
+      ctx.strokeStyle = "#3a4452"; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(px(o.at), top); ctx.lineTo(px(o.at), top + bh); ctx.stroke(); ctx.setLineDash([]);
+      for (let i = 0; i < n; i++) {
+        const cy = py(pitch * (i + .5));
+        const on = o.active[i], puff = o.puff[i];
+        ctx.fillStyle = on ? "#ff8c42" : "#55606f";
+        ctx.beginPath(); ctx.moveTo(px(o.at) - 7, cy - 4); ctx.lineTo(px(o.at) + 1, cy); ctx.lineTo(px(o.at) - 7, cy + 4); ctx.closePath(); ctx.fill();
+        if (on || puff) {
+          ctx.fillStyle = on ? "rgba(255,140,66,.45)" : "rgba(255,140,66,.18)";
+          ctx.fillRect(px(o.at - o.reach / 2), py(pitch * i) + 1, o.reach * sx, pitch * sy - 2);
+        }
+        ctx.fillStyle = "#55606f"; ctx.font = "8px ui-monospace"; ctx.fillText(String(i + 1), px(o.at) + 3, cy);
+      }
+    }
     // センサ・ストッパ・供給
     for (const o of objs) {
       if (o.type === "sensor" && o.conv === c.name) {
-        const x = X0 + o.at * sx;
+        const x = px(o.at);
         ctx.fillStyle = o.on ? "#39d353" : "#3a4452";
-        ctx.beginPath(); ctx.moveTo(x, yc - 12); ctx.lineTo(x - 6, yc - 22); ctx.lineTo(x + 6, yc - 22); ctx.closePath(); ctx.fill();
-        if (o.on) { ctx.strokeStyle = "rgba(57,211,83,.5)"; ctx.beginPath(); ctx.moveTo(x, yc - 12); ctx.lineTo(x, yc + 12); ctx.stroke(); }
-        ctx.fillStyle = o.on ? "#39d353" : "#7c8695"; ctx.font = "10px system-ui"; ctx.textAlign = "center"; ctx.fillText(o.name, x, yc - 28); ctx.textAlign = "left";
+        ctx.beginPath(); ctx.moveTo(x, top - 2); ctx.lineTo(x - 6, top - 12); ctx.lineTo(x + 6, top - 12); ctx.closePath(); ctx.fill();
+        if (o.on) { ctx.strokeStyle = "rgba(57,211,83,.6)"; ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + bh); ctx.stroke(); }
+        ctx.fillStyle = o.on ? "#39d353" : "#7c8695"; ctx.font = "10px system-ui"; ctx.textAlign = "center"; ctx.fillText(o.name, x, top - 18); ctx.textAlign = "left";
       } else if (o.type === "stopper" && o.conv === c.name) {
-        const x = X0 + o.at * sx;
+        const x = px(o.at);
         ctx.fillStyle = o.up ? "#ff5c5c" : "#3a4452";
-        const h = 6 + 14 * o.level;
-        ctx.fillRect(x - 2, yc + 10 - h, 4, h);
-        ctx.fillStyle = o.up ? "#ff5c5c" : "#7c8695"; ctx.font = "10px system-ui"; ctx.textAlign = "center"; ctx.fillText(o.name, x, yc + 26); ctx.textAlign = "left";
+        ctx.fillRect(x - 2, top + bh * (1 - o.level), 4, bh * o.level);
+        ctx.fillStyle = o.up ? "#ff5c5c" : "#7c8695"; ctx.font = "10px system-ui"; ctx.textAlign = "center"; ctx.fillText(o.name, x, top + bh + 16); ctx.textAlign = "left";
       } else if (o.type === "emitter" && o.conv === c.name) {
-        const x = X0 + o.at * sx;
-        ctx.fillStyle = "#7c8695"; ctx.beginPath(); ctx.moveTo(x, yc - 24); ctx.lineTo(x + 5, yc - 14); ctx.lineTo(x - 5, yc - 14); ctx.closePath(); ctx.fill();
-        ctx.font = "10px system-ui"; ctx.textAlign = "center"; ctx.fillText(`${o.name} (${o.total})`, x + 4, yc - 30); ctx.textAlign = "left";
+        const x = px(o.at);
+        ctx.fillStyle = "#7c8695"; ctx.beginPath(); ctx.moveTo(x, top - 14); ctx.lineTo(x + 5, top - 4); ctx.lineTo(x - 5, top - 4); ctx.closePath(); ctx.fill();
+        ctx.font = "10px system-ui"; ctx.textAlign = "center"; ctx.fillText(`${o.name} (${o.total})`, x + 4, top - 20); ctx.textAlign = "left";
       }
     }
-    // ワーク
+    // ワーク (NG は赤)
     for (const w of sim.works) {
       if (w.conv !== c.name) continue;
-      const x1 = X0 + (w.pos - w.len) * sx, x2 = X0 + w.pos * sx;
-      ctx.fillStyle = w.blocked ? "#f5b22b" : "#ffd35c";
-      ctx.fillRect(Math.max(X0, x1), yc - 7, Math.max(2, Math.min(x2, X0 + len) - Math.max(X0, x1)), 14);
-      ctx.fillStyle = "#222"; ctx.font = "9px ui-monospace"; ctx.textAlign = "center"; ctx.fillText(String(w.id), (x1 + x2) / 2, yc); ctx.textAlign = "left";
+      const x1 = Math.max(X0, px(w.pos - w.len)), x2 = Math.min(X0 + len, px(w.pos));
+      const ww = (w.w || w.len) * sy, wy = py(w.y ?? (c.width || 300) / 2) - ww / 2;
+      ctx.fillStyle = w.ng ? (w.blocked ? "#c43b3b" : "#ff5c5c") : (w.blocked ? "#f5b22b" : "#ffd35c");
+      ctx.fillRect(x1, wy, Math.max(2, x2 - x1), ww);
+      if (w.rep) { ctx.fillStyle = "#78dcff"; ctx.fillRect(x2 - 4, wy, 3, 3); }
+      ctx.fillStyle = "#222"; ctx.font = "9px ui-monospace"; ctx.textAlign = "center"; ctx.fillText(String(w.id), (x1 + x2) / 2, wy + ww / 2); ctx.textAlign = "left";
     }
-    y += ROW;
+    y += rowOf(c);
   }
+  const ROW = 64;
   for (const c of cyls) {
     const yc = y + ROW / 2;
     ctx.fillStyle = "#aab4c3"; ctx.font = "bold 12px system-ui"; ctx.fillText(c.name, 8, yc - 8);
