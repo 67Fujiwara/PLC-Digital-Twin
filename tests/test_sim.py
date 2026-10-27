@@ -286,3 +286,21 @@ def test_demo_line_tracking_rejects_ng():
     assert st["ng_passed"] == 0
     assert st["ok_ejected"] <= 2          # 隣接ワークへの巻き込み (ノズル帯 75mm に対しワーク幅 60mm)
     assert st["ok_passed"] >= 5
+
+
+def test_camera_lane_output():
+    cfg, world, io, out, inp = make2([
+        {"name": "c1", "type": "conveyor", "run": "out.RUN", "length": 2000, "width": 320, "speed": 300},
+        {"name": "cam", "type": "camera", "on": "c1", "at": 600, "fov": 300, "delay": 0.02, "lanes": 32,
+         "done": "in.DONE", "lane_out": "in.w2"},
+    ], [])
+    from twin.config import Ref
+    world.spawn("c1", 580, 50, y=5, ng=True)       # レーン 1 (bit0)
+    world.spawn("c1", 500, 50, y=315, ng=True)     # レーン 32 (word1 bit15)
+    world.spawn("c1", 540, 50, y=100, ng=False)    # OK は出ない
+    out[0] = 1
+    run(world, io, 0.12)
+    assert io.get(cfg.tag("in", "DONE").ref) == 1
+    assert io.get(Ref("in", "word", 2)) == 0x0001 and io.get(Ref("in", "word", 3)) == 0x8000
+    run(world, io, 0.15)                            # done_time 後に OFF (後続ワークの撮像結果は NG 0 なのでレーンは 0)
+    assert io.get(Ref("in", "word", 2)) == 0 and io.get(Ref("in", "word", 3)) == 0

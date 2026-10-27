@@ -492,6 +492,8 @@ class Camera(Behavior):
                 results: 先頭ワード (NG ごとに 2 ワード: X, Y)  slots: 最大個数 (既定 4)
                 x_unit/y_unit: 座標の単位 mm (既定 1 → 1mm/1digit, 0.1 なら 0.1mm/digit)
     ack: out.X を指定すると、done は ack の立上りまで保持 (ハンドシェイク)。省略時は done_time s (既定 0.1) で自動 OFF
+    lane_out: in.wN + lanes: N (+ lane_pitch / lane_y0): 座標の代わりに「レーン n に NG あり」をビットで出す
+                (画像検査装置が SOL 番号ごとの排斥要求を返す方式。bit0 = レーン1。done と同じ期間 ON)
     座標系: X = 撮像瞬間の「ワーク中心 − トリガ線」(下流が正)、Y = コンベヤ片側エッジからワーク中心まで。
     PLC 側は「ワーク位置 = at + X + (エンコーダ差 ÷ pulses_per_mm)」で追従する。
     """
@@ -513,6 +515,11 @@ class Camera(Behavior):
         self.slots = int(d.get("slots", 4))
         self.x_unit = _f(d, "x_unit", 1.0)
         self.y_unit = _f(d, "y_unit", 1.0)
+        self.lane_out = self.ref("lane_out")
+        self.lanes = int(d.get("lanes", 0))
+        self.lane_pitch = d.get("lane_pitch")
+        self.lane_y0 = d.get("lane_y0")
+        self.lane_bits = 0
         self.prev_trig = False
         self.prev_ack = False
         self.t = 0.0
@@ -528,8 +535,22 @@ class Camera(Behavior):
         self.pending.clear()
         self.done = False
         self.last = []
+        self.lane_bits = 0
         self.captures = 0
         self._prev_front.clear()
+
+    def lane_of(self, y: float, world: World) -> int:
+        conv = world.by_name.get(self.conv)
+        cw = float(getattr(conv, "width", 300.0))
+        pitch = float(self.lane_pitch) if self.lane_pitch is not None else cw / max(1, self.lanes)
+        y0 = float(self.lane_y0) if self.lane_y0 is not None else 0.0
+        return min(self.lanes - 1, max(0, int((y - y0) // pitch)))
+
+    def _write_lanes(self, io: IOBus, bits: int) -> None:
+        if self.lane_out is None:
+            return
+        for i in range((self.lanes + 15) // 16):
+            io.set(Ref(self.lane_out.block, "word", self.lane_out.word + i, 0, "u16"), (bits >> (16 * i)) & 0xFFFF)
 
     def capture(self, world: World) -> None:
         conv = world.by_name.get(self.conv)
@@ -576,6 +597,11 @@ class Camera(Behavior):
                     x, y = self.last[i] if i < len(self.last) else (0.0, 0.0)
                     io.set(Ref(self.results.block, "word", self.results.word + 2 * i, 0, "s16"), x / self.x_unit)
                     io.set(Ref(self.results.block, "word", self.results.word + 2 * i + 1, 0, "u16"), y / self.y_unit)
+            if self.lane_out is not None and self.lanes > 0:
+                self.lane_bits = 0
+                for x, y in res:               # slots を超えた分もレーン出力には反映
+                    self.lane_bits |= 1 << self.lane_of(y, world)
+                self._write_lanes(io, self.lane_bits)
             self.done = True
             self.done_until = self.t + self.done_time
         if self.ack is not None:
@@ -586,9 +612,13 @@ class Camera(Behavior):
         elif self.done and self.t >= self.done_until:
             self.done = False
         io.set(self.done_ref, self.done)
+        if not self.done and self.lane_bits:
+            self.lane_bits = 0
+            self._write_lanes(io, 0)
 
     def state(self):
         return {"name": self.name, "type": self.type, "conv": self.conv, "at": self.pos, "fov": self.fov,
+                "lanes": self.lanes, "lane_bits": self.lane_bits,
                 "done": self.done, "flash": self.flash > 0, "captures": self.captures, "queued": len(self.pending),
                 "last": [[round(x, 1), round(y, 1)] for x, y in self.last]}
 
@@ -701,7 +731,7 @@ def validate_objects(cfg: TwinConfig) -> None:
     # 書込み先が in 以外なら警告相当のエラー (PLC出力に書くのは誤り)
     for o in world.objects:
         for key in ("output", "end_sensor", "home_sensor", "pos", "busy", "inpos", "encoder",
-                    "done", "count", "enc", "results"):
+                    "done", "count", "enc", "results", "lane_out"):
             r = o.ref(key) if key in o.d else None
             if r is not None and r.block != "in":
                 raise ValueError(f"objects.{o.name}.{key}: 書込み先は in.* にしてください ({o.d[key]})")

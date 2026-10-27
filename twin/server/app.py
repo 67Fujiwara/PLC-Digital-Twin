@@ -96,7 +96,7 @@ class TwinApp:
         with self.lock:
             hist = list(self.ring)[-n_hist:]
         if hist:
-            await client.send_text(json.dumps({"type": "history", "samples": hist}, separators=(",", ":")))
+            await client.send_text(json.dumps({"type": "history", "samples": _dedup_watch(hist)}, separators=(",", ":")))
 
     async def _on_message(self, client: WSClient, text: str) -> None:
         try:
@@ -161,7 +161,7 @@ class TwinApp:
                 last_log = logs[-1]["t"]
             frame = {
                 "type": "frame",
-                "samples": new[-max(50, int(interval * 1000 / max(0.5, self.cfg.cycle_ms) * 2)):],   # 短周期でも落とさない
+                "samples": _dedup_watch(new[-max(50, int(interval * 1000 / max(0.5, self.cfg.cycle_ms) * 2)):]),
                 "sim": latest["sim"],
                 "stat": latest["stat"],
                 "forces": latest["forces"],
@@ -291,6 +291,22 @@ class TwinApp:
             self.proc.join(timeout=2)
             if self.proc.is_alive():
                 self.proc.terminate()
+
+
+def _dedup_watch(samples: list) -> list:
+    """連続するサンプルで watch が同じなら 2 個目以降は省く (監視ワードは周期より遅く更新されるため)。
+    ブラウザ側は前のサンプルの watch を引き継ぐ。先頭は必ず持つ。"""
+    out = []
+    prev = None
+    for s in samples:
+        if prev is not None and s["watch"] == prev:
+            c = dict(s)
+            del c["watch"]
+            out.append(c)
+        else:
+            out.append(s)
+            prev = s["watch"]
+    return out
 
 
 def _compact(s: dict) -> dict:

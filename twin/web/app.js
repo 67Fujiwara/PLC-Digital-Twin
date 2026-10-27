@@ -93,6 +93,7 @@ function onMessage(m) {
 }
 
 function pushSample(s, detect) {
+  if (!s.watch) s.watch = state.latest ? state.latest.watch : [];   // 省略 = 前回と同じ
   state.samples.push(s);
   if (state.samples.length > state.maxSamples) state.samples.splice(0, state.samples.length - state.maxSamples);
   if (detect && state.latest) detectEvents(state.latest, s);

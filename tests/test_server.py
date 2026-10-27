@@ -94,6 +94,8 @@ def test_app_end_to_end(tmp_path):
             op, data = await read_frame(r)
             hist = json.loads(data)
             assert hist["type"] == "history" and len(hist["samples"]) > 10
+            assert "watch" in hist["samples"][0]                      # 先頭は必ず watch を持つ
+            assert any("watch" not in x for x in hist["samples"][1:])  # 変化なしは省略
             # frame を受ける
             frames = []
             while len(frames) < 5:

@@ -1,0 +1,87 @@
+# Line A (Phoenix 画像検査 + SOL 32 連 排斥) のツイン設定 [雛形]。
+# a.yaml (デバイスモニタ) とは別に、PLC に I/O 層 (docs/a_next_steps.md) を入れてから使う。
+#   python -m twin configs/a_twin.yaml --mock     # まず PC だけで動かして流れを見る
+#   python -m twin configs/a_twin.yaml            # 実機 (TWIN_MODE = MR000 を ON)
+# TODO と書いた値は装置の実寸・実設定に合わせる。
+title: Line A twin (KV)
+plc:
+  type: keyence
+  ip: 192.168.0.10            # TODO: 実機 IP
+  port: 8501
+  logic: twin.drivers.line_a_logic   # --mock のときだけ使う疑似ラダー (REQ → 1.0s 後に SOL を 60ms)
+  out: {dev: DM, addr: 1000, words: 16}   # PLC -> PC: word0 = Y010〜Y01F の鏡 (MR200ch), word2,3 = SOL01〜32 出力 (MR300,MR400ch)
+  in:  {dev: DM, addr: 1100, words: 16}   # PC -> PLC: word0 = X000〜X00F の仮想入力 (-> MR100ch), word2,3 = SOL01〜32 排斥REQ (-> MR800,MR900ch), word4,5 = エンコーダ
+cycle_ms: auto
+record_seconds: 120
+include: [a.tags.yaml]        # a.csv から取り込んだデバイスコメント (監視用) も同じ画面に出す
+
+tags:
+  out:
+    # Y010〜Y01F (R500〜R515) の鏡。TODO: 各出力の意味をコメントに
+    - {name: Y010, bit: "0.0", comment: TODO}
+    - {name: Y011, bit: "0.1", comment: TODO}
+    - {name: Y012, bit: "0.2", comment: TODO}
+    - {name: Y013, bit: "0.3", comment: TODO}
+    - {name: CONV_RUN, bit: "0.4", comment: "TODO: 搬送コンベヤ運転 (該当する Y に合わせる)"}
+    - {name: SOL_W1, word: 2, comment: SOL01〜16 出力 (bit0=SOL01)}
+    - {name: SOL_W2, word: 3, comment: SOL17〜32 出力 (bit0=SOL17)}
+    - {name: SOL01, bit: "2.0"}
+    - {name: SOL02, bit: "2.1"}
+    - {name: SOL03, bit: "2.2"}
+    - {name: SOL04, bit: "2.3"}
+    - {name: SOL05, bit: "2.4"}
+    - {name: SOL06, bit: "2.5"}
+    - {name: SOL07, bit: "2.6"}
+    - {name: SOL08, bit: "2.7"}
+    - {name: SOL09, bit: "2.8"}
+    - {name: SOL10, bit: "2.9"}
+    - {name: SOL11, bit: "2.10"}
+    - {name: SOL12, bit: "2.11"}
+    - {name: SOL13, bit: "2.12"}
+    - {name: SOL14, bit: "2.13"}
+    - {name: SOL15, bit: "2.14"}
+    - {name: SOL16, bit: "2.15"}
+    - {name: SOL17, bit: "3.0"}
+    - {name: SOL18, bit: "3.1"}
+    - {name: SOL19, bit: "3.2"}
+    - {name: SOL20, bit: "3.3"}
+    - {name: SOL21, bit: "3.4"}
+    - {name: SOL22, bit: "3.5"}
+    - {name: SOL23, bit: "3.6"}
+    - {name: SOL24, bit: "3.7"}
+    - {name: SOL25, bit: "3.8"}
+    - {name: SOL26, bit: "3.9"}
+    - {name: SOL27, bit: "3.10"}
+    - {name: SOL28, bit: "3.11"}
+    - {name: SOL29, bit: "3.12"}
+    - {name: SOL30, bit: "3.13"}
+    - {name: SOL31, bit: "3.14"}
+    - {name: SOL32, bit: "3.15"}
+  in:
+    # X000〜X00F (R000〜R015) の仮想入力。TODO: 各入力の意味をコメントに (センサ/ボタン)
+    - {name: X000, bit: "0.0", comment: "TODO: 例 ワーク検出"}
+    - {name: X001, bit: "0.1", comment: TODO}
+    - {name: X002, bit: "0.2", comment: TODO}
+    - {name: X003, bit: "0.3", comment: TODO}
+    - {name: REQ_W1, word: 2, comment: "SOL01〜16 排斥REQ [from Ins] (bit0=SOL1-01)"}
+    - {name: REQ_W2, word: 3, comment: "SOL17〜32 排斥REQ [from Ins]"}
+    - {name: EYE1_DONE, bit: "1.0", comment: "Eye1 検査完了 (B020 相当)"}
+    - {name: ENC, word: 4, type: u32, comment: "搬送エンコーダ (無ければ未使用)"}
+
+objects:
+  # TODO: 実寸に合わせる。幅 = SOL 32 連 × ピッチ。camera.at / airblow.at はカメラ中心・ノズル位置 (搬送方向 mm)
+  - {name: conv, type: conveyor, run: out.CONV_RUN, length: 1500, width: 640, speed: 300,
+     encoder: in.ENC, pulses_per_mm: 10}
+  - {name: supply, type: emitter, onto: conv, every: 0.6, jitter: 0.6, length: 30, width: 30,
+     y: random, ng_rate: 0.3, max: 60}
+  - {name: PE_IN, type: sensor, on: conv, at: 100, output: in.X000}
+  # Eye1: トリガ線 400mm、視野 200mm。NG のレーン (SOL 番号) を REQ ビットで返す (Phoenix と同じ方式)。
+  # lane_pitch = 640 / 32 = 20mm。DM17700〜 の「SOL 下限/上限 X 座標」と同じ区切りにする
+  - {name: Eye1, type: camera, on: conv, at: 400, fov: 200, delay: 0.03, done_time: 0.05,
+     done: in.EYE1_DONE, lanes: 32, lane_pitch: 20, lane_out: in.REQ_W1}
+  # SOL 32 連: 位置 700mm。PLC の SOL01〜32 出力 (out word2,3) で吹く
+  - {name: SOL, type: airblow, on: conv, at: 700, nozzles: 32, pitch: 20, band: 18, reach: 30,
+     blow: [out.SOL01, out.SOL02, out.SOL03, out.SOL04, out.SOL05, out.SOL06, out.SOL07, out.SOL08,
+            out.SOL09, out.SOL10, out.SOL11, out.SOL12, out.SOL13, out.SOL14, out.SOL15, out.SOL16,
+            out.SOL17, out.SOL18, out.SOL19, out.SOL20, out.SOL21, out.SOL22, out.SOL23, out.SOL24,
+            out.SOL25, out.SOL26, out.SOL27, out.SOL28, out.SOL29, out.SOL30, out.SOL31, out.SOL32]}
