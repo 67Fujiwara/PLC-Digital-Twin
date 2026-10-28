@@ -356,9 +356,9 @@ $("b-import").onclick = () => $("f-import").click();
 $("f-import").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
   e.target.value = "";
-  const sys = confirm(`${f.name} を取り込みます。\n\nシステムデバイス (KV: CM/CR, 三菱: SM/SD) も取り込みますか?\n[OK]=取り込む  [キャンセル]=除外 (通常はこちら)`) ? 1 : 0;
+  // システムデバイス (KV: CM/CR, 三菱: SM/SD/SB/SW) は常に除外 (重くなるだけで装置の動きには関係ない)
   const body = await f.arrayBuffer();
-  const r = await fetch(`/api/import?name=${encodeURIComponent(f.name)}&system=${sys}`, {method: "POST", body});
+  const r = await fetch(`/api/import?name=${encodeURIComponent(f.name)}&system=0`, {method: "POST", body});
   const j = await r.json();
   if (!r.ok) { alert("取込失敗: " + (j.error || r.status) + (j.skipped ? "\n" + j.skipped.map(x => x.join(": ")).join("\n") : "")); return; }
   const sk = (j.skipped || []).map(x => `${x[0]}: ${x[1]}`).join("\n");

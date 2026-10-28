@@ -12,10 +12,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from .config import TwinConfig, bit_address, word_address, is_bit_device, KEYENCE_CH_DEVICES
+from .config import TwinConfig, bit_address, word_address, is_bit_device, KEYENCE_CH_DEVICES, SYSTEM_DEVICES
 from .drivers import Driver, DriverError
 
 # 既定スキャン範囲 (dev, 先頭番号, ワード数)。ビットデバイスはワード (16 点) 単位。
+# システムデバイス (KV: CR/CM, 三菱: SM/SD/SB/SW) と T/C は含めない (件数が多いだけで装置の動きには関係ない)。
+# YAML の scan: に書いた場合も SYSTEM_DEVICES は読み飛ばす。
 DEFAULT_SCAN = {
     "keyence": [("R", 0, 600), ("MR", 0, 1000), ("LR", 0, 1000), ("B", 0, 1024),
                 ("DM", 0, 65535), ("W", 0, 16384)],
@@ -54,6 +56,8 @@ def ranges_for(cfg: TwinConfig) -> list[ScanRange]:
     if raw:
         for r in raw:
             dev = str(r["dev"]).upper()
+            if dev in SYSTEM_DEVICES.get(cfg.plc_type, set()):
+                continue
             out.append(ScanRange(dev, int(r.get("addr", 0)), int(r.get("words", 1)), is_bit_device(cfg.plc_type, dev)))
     else:
         for dev, addr, words in DEFAULT_SCAN.get(cfg.plc_type, DEFAULT_SCAN["mock"]):
