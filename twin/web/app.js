@@ -20,6 +20,7 @@ const state = {
   wsFps: 0, wsCount: 0, latency: 0,
   changedAt: new Map(), // key -> 最終変化時刻
   cursorX: null,
+  dirty: true,
   hidden: new Set(),    // 非表示タグ (tag key)
   watchEntries: [],     // 監視デバイス一覧 (編集用)
 };
@@ -77,7 +78,7 @@ function onMessage(m) {
   if (m.type === "hello") { setup(m.config); return; }
   if (m.type === "error") { addLog({t: Date.now() / 1000, level: "error", msg: m.msg}); alert(m.msg); return; }
   if (m.type === "pong") { state.latency = performance.now() - m.t; return; }
-  if (m.type === "history") { for (const s of m.samples) pushSample(s, false); state.prev = state.latest; return; }
+  if (m.type === "history") { for (const s of m.samples) pushSample(s, false); state.prev = state.latest; state.dirty = true; return; }
   if (m.type !== "frame") return;
   state.wsCount++;
   for (const s of m.samples) pushSample(s, true);
@@ -90,6 +91,7 @@ function onMessage(m) {
   for (const l of m.logs || []) addLog(l);
   updateHeader(m);
   updateDevices();
+  state.dirty = true;
 }
 
 function pushSample(s, detect) {
@@ -111,7 +113,12 @@ function setup(cfg) {
   $("plcinfo").textContent = `${cfg.plc.type.toUpperCase()} ${cfg.plc.ip || ""}${cfg.plc.port ? ":" + cfg.plc.port : ""}${cfg.plc.driver === "mock" ? " (モック: 未接続)" : ""}`;
   state.maxSamples = Math.max(3000, Math.round(cfg.record_seconds * 1000 / cfg.cycle_ms));
   state.tags = []; state.tagByKey.clear();
-  for (const b of ["out", "in", "watch"]) for (const t of cfg.tags[b] || []) { state.tags.push(t); state.tagByKey.set(tagKey(t), t); }
+  state.wordIdx = {out: new Map(), in: new Map(), watch: new Map()};
+  for (const b of ["out", "in", "watch"]) for (const t of cfg.tags[b] || []) {
+    state.tags.push(t); state.tagByKey.set(tagKey(t), t);
+    const nw = (t.dtype === "u32" || t.dtype === "s32") ? 2 : 1;
+    for (let w = t.word; w < t.word + nw; w++) { const m = state.wordIdx[b]; if (!m.has(w)) m.set(w, []); m.get(w).push(t); }
+  }
   $("h-out").textContent = `${cfg.out.dev}${cfg.out.addr} × ${cfg.out.words}w`;
   $("h-in").textContent = `${cfg.in.dev}${cfg.in.addr} × ${cfg.in.words}w`;
   $("h-watch").textContent = cfg.watch.length > 6
@@ -436,7 +443,7 @@ function makeRow(t) {
       if (val.querySelector("input")) return;
       const inp = document.createElement("input"); inp.className = "w"; inp.value = String(r.last ?? 0);
       let closed = false;   // Chrome は remove() 中に blur を同期発火するため二重 remove を防ぐ
-      const close = () => { if (closed) return; closed = true; inp.remove(); r.last = null; };
+      const close = () => { if (closed) return; closed = true; inp.remove(); r.last = null; r.editing = false; };
       inp.onclick = (ev) => ev.stopPropagation();
       inp.onkeydown = (ev) => {
         if (ev.key === "Enter") {
@@ -450,7 +457,7 @@ function makeRow(t) {
         } else if (ev.key === "Escape") { close(); }
       };
       inp.onblur = close;
-      val.textContent = ""; val.appendChild(inp); inp.focus(); inp.select();
+      r.editing = true; val.textContent = ""; val.appendChild(inp); inp.focus(); inp.select();
     };
     if (t.block === "in") {
       const rel = el("span", "rel", "✕"); rel.title = "強制解除";
@@ -459,7 +466,8 @@ function makeRow(t) {
     }
   }
   tr.appendChild(ed);
-  const r = {tr, val, hx, cv, last: null};
+  const r = {tr, val, hx, cv, last: null, visible: false, editing: false, chg: false, cls: ""};
+  sparkObserver.observe(tr); tr._row = r;
   tr.onclick = () => toggleWave(key);
   dom.rows.set(key, r);
   return tr;
@@ -483,6 +491,7 @@ function updateDevices() {
   const forcedBits = new Set(state.forces.bits.map(f => `${f.block}.${f.word}.${f.bit}`));
   const forcedBitVal = new Map(state.forces.bits.map(f => [`${f.block}.${f.word}.${f.bit}`, f.value]));
   const forcedWords = new Set(state.forces.words.map(f => `${f.block}.${f.word}`));
+  const waveSet = new Set(state.wave);
   for (const t of state.tags) {
     const key = tagKey(t);
     if (state.hidden.has(key)) continue;
@@ -490,29 +499,28 @@ function updateDevices() {
     if (t.kind === "bit") {
       const c = dom.chips.get(key); if (!c) continue;
       const on = !!v;
-      if (c.classList.contains("on") !== on) {
-        c.classList.toggle("on", on);
-        c.classList.remove("chg"); void c.offsetWidth; c.classList.add("chg");
-      }
       const fk = `${t.block}.${t.word}.${t.bit}`;
       const f = forcedBits.has(fk);
-      c.classList.toggle("forced", f);
-      c.classList.toggle("fon", f && !!forcedBitVal.get(fk));
-      c.classList.toggle("foff", f && !forcedBitVal.get(fk));
-      c.classList.toggle("sel", state.wave.includes(key));
+      // クラス文字列を組み立てて、変わったときだけ DOM に触る
+      const cls = "chip" + (on ? " on" : "") + (f ? (forcedBitVal.get(fk) ? " forced fon" : " forced foff") : "") + (waveSet.has(key) ? " sel" : "");
+      if (c._cls !== cls) {
+        const flash = c._cls !== undefined && (c._on !== on);
+        c.className = cls + (flash ? " chg" : "");
+        c._cls = cls; c._on = on;
+      }
     } else {
       const r = dom.rows.get(key); if (!r) continue;
-      if (r.last !== v && !r.val.querySelector("input")) {
+      if (r.last !== v && !r.editing) {
         r.val.textContent = v.toLocaleString();
         r.hx.textContent = hex(v, t.dtype.endsWith("32") ? 8 : 4);
-        r.val.classList.add("chg"); state.changedAt.set(key, now);
+        if (!r.chg) { r.val.classList.add("chg"); r.chg = true; }
+        state.changedAt.set(key, now);
         r.last = v;
-      } else if (state.changedAt.get(key) && now - state.changedAt.get(key) > 400) {
-        r.val.classList.remove("chg"); state.changedAt.delete(key);
+      } else if (r.chg && now - (state.changedAt.get(key) || 0) > 400) {
+        r.val.classList.remove("chg"); r.chg = false; state.changedAt.delete(key);
       }
-      r.tr.classList.toggle("forced", forcedWords.has(`${t.block}.${t.word}`));
-      r.tr.classList.toggle("sel", state.wave.includes(key));
-      drawSpark(r.cv, t);
+      const cls = (forcedWords.has(`${t.block}.${t.word}`) ? "forced " : "") + (waveSet.has(key) ? "sel" : "");
+      if (r.cls !== cls) { r.tr.className = cls; r.cls = cls; }
     }
   }
   if (!$("raw").classList.contains("hidden")) {
@@ -529,12 +537,23 @@ function updateDevices() {
   state.prev = s;
 }
 
+// スパークラインは画面に見えている行だけ 3Hz で描く (毎フレーム全行描くと重い)
+const sparkObserver = new IntersectionObserver((entries) => { for (const e of entries) if (e.target._row) e.target._row.visible = e.isIntersecting; });
+setInterval(() => {
+  if (!state.latest) return;
+  for (const t of state.tags) {
+    if (t.kind === "bit") continue;
+    const r = dom.rows.get(tagKey(t));
+    if (r && r.visible && !state.hidden.has(tagKey(t))) drawSpark(r.cv, t);
+  }
+}, 333);
+
 function drawSpark(cv, t) {
   const n = 70, ctx = cv.getContext("2d");
   const ss = state.samples, len = ss.length;
   ctx.clearRect(0, 0, cv.width, cv.height);
   if (len < 2) return;
-  const step = Math.max(1, Math.floor(300 / n));   // 直近 3 秒
+  const step = Math.max(1, Math.floor((3000 / (state.cfg ? state.cfg.cycle_ms : 10)) / n));   // 直近 3 秒
   let mn = Infinity, mx = -Infinity; const vals = [];
   for (let i = Math.max(0, len - n * step); i < len; i += step) { const v = getVal(ss[i], t); vals.push(v); if (v < mn) mn = v; if (v > mx) mx = v; }
   if (mx === mn) { mx = mn + 1; }
@@ -576,13 +595,26 @@ function updateHeader(m) {
 // イベント (立上り/立下り/数値変化)
 // ---------------------------------------------------------------------------
 function detectEvents(a, b) {
-  for (const t of state.tags) {
-    if (t.kind === "bit") {
-      const va = getVal(a, t), vb = getVal(b, t);
-      if (va !== vb) addEvent({t: b.wall, seq: b.seq, kind: vb ? "up" : "dn", tag: t, text: vb ? "ON" : "OFF"});
-    } else if (state.evWords) {
-      const va = getVal(a, t), vb = getVal(b, t);
-      if (va !== vb) addEvent({t: b.wall, seq: b.seq, kind: "wv", tag: t, text: `${va} → ${vb}`});
+  // 値が変わったワードに乗っているタグだけ比較する (全タグ走査しない)
+  if (!state.wordIdx) return;
+  const seen = new Set();
+  for (const blk of ["out", "in", "watch"]) {
+    const pa = blockArr(a, blk), pb = blockArr(b, blk), idx = state.wordIdx[blk];
+    if (!pa || !pb || pa === pb) continue;
+    const n = Math.min(pa.length, pb.length);
+    for (let w = 0; w < n; w++) {
+      if (pa[w] === pb[w]) continue;
+      const tags = idx.get(w); if (!tags) continue;
+      for (const t of tags) {
+        if (seen.has(t)) continue; seen.add(t);
+        if (t.kind === "bit") {
+          const va = getVal(a, t), vb = getVal(b, t);
+          if (va !== vb) addEvent({t: b.wall, seq: b.seq, kind: vb ? "up" : "dn", tag: t, text: vb ? "ON" : "OFF"});
+        } else if (state.evWords) {
+          const va = getVal(a, t), vb = getVal(b, t);
+          if (va !== vb) addEvent({t: b.wall, seq: b.seq, kind: "wv", tag: t, text: `${va} → ${vb}`});
+        }
+      }
     }
   }
 }
@@ -695,27 +727,54 @@ function drawWave() {
     if (curSeq != null) tip.push(`${t.name.padEnd(14)} ${dig ? (cur ? "ON" : "OFF") : cur}`);
     // 波形
     ctx.beginPath(); ctx.strokeStyle = "#1f252e"; ctx.moveTo(x0, y + rowH - 1); ctx.lineTo(W, y + rowH - 1); ctx.stroke();
+    const dense = (i1 - i0 + 1) > PW * 1.5;      // サンプル数 > ピクセル数: ピクセル単位に束ねる
     if (dig) {
-      ctx.strokeStyle = t.block === "out" ? "#4da3ff" : t.block === "in" ? "#39d353" : "#e8d59a"; ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      let prev = null;
-      for (let i = i0; i <= i1; i++) {
-        const s = ss[i], v = getVal(s, t), x = seqToX(s.seq), yy = v ? y + 4 : y + rowH - 5;
-        if (prev == null) ctx.moveTo(Math.max(x0, x), yy);
-        else { ctx.lineTo(x, prev ? y + 4 : y + rowH - 5); ctx.lineTo(x, yy); }
-        prev = v;
+      const col = t.block === "out" ? "#4da3ff" : t.block === "in" ? "#39d353" : "#e8d59a";
+      const fill = t.block === "out" ? "rgba(77,163,255,.12)" : t.block === "in" ? "rgba(57,211,83,.12)" : "rgba(232,213,154,.12)";
+      const yOn = y + 4, yOff = y + rowH - 5;
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.fillStyle = fill;
+      if (dense) {
+        const npx = Math.ceil(PW) + 1, hasOn = new Uint8Array(npx), hasOff = new Uint8Array(npx), lastV = new Int8Array(npx).fill(-1);
+        for (let i = i0; i <= i1; i++) {
+          const s = ss[i], v = getVal(s, t), p = Math.floor(seqToX(s.seq) - x0);
+          if (p < 0 || p >= npx) continue;
+          if (v) hasOn[p] = 1; else hasOff[p] = 1;
+          lastV[p] = v ? 1 : 0;
+        }
+        ctx.beginPath();
+        let prev = -1, onStart = -1;
+        for (let p = 0; p < npx; p++) {
+          if (lastV[p] < 0) continue;
+          const x = x0 + p;
+          if (hasOn[p] && hasOff[p]) { ctx.moveTo(x, yOn); ctx.lineTo(x, yOff); }
+          const lv = lastV[p];
+          if (prev >= 0 && prev !== lv) { ctx.moveTo(x, prev ? yOn : yOff); ctx.lineTo(x, lv ? yOn : yOff); }
+          ctx.moveTo(x, lv ? yOn : yOff); ctx.lineTo(x + 1, lv ? yOn : yOff);
+          if (hasOn[p] && onStart < 0) onStart = x;
+          if (!hasOn[p] && onStart >= 0) { ctx.fillRect(onStart, yOn, x - onStart, rowH - 9); onStart = -1; }
+          prev = lv;
+        }
+        if (onStart >= 0) ctx.fillRect(onStart, yOn, seqToX(nowSeq) - onStart, rowH - 9);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        let prev = null;
+        for (let i = i0; i <= i1; i++) {
+          const s = ss[i], v = getVal(s, t), x = seqToX(s.seq), yy = v ? yOn : yOff;
+          if (prev == null) ctx.moveTo(Math.max(x0, x), yy);
+          else { ctx.lineTo(x, prev ? yOn : yOff); ctx.lineTo(x, yy); }
+          prev = v;
+        }
+        if (prev != null) ctx.lineTo(seqToX(nowSeq), prev ? yOn : yOff);
+        ctx.stroke();
+        let onStart = null;
+        for (let i = i0; i <= i1; i++) {
+          const s = ss[i], v = getVal(s, t);
+          if (v && onStart == null) onStart = seqToX(s.seq);
+          if (!v && onStart != null) { ctx.fillRect(Math.max(x0, onStart), yOn, seqToX(s.seq) - Math.max(x0, onStart), rowH - 9); onStart = null; }
+        }
+        if (onStart != null) ctx.fillRect(Math.max(x0, onStart), yOn, seqToX(nowSeq) - Math.max(x0, onStart), rowH - 9);
       }
-      if (prev != null) ctx.lineTo(seqToX(nowSeq), prev ? y + 4 : y + rowH - 5);
-      ctx.stroke();
-      // ON 区間の塗り
-      ctx.fillStyle = t.block === "out" ? "rgba(77,163,255,.12)" : t.block === "in" ? "rgba(57,211,83,.12)" : "rgba(232,213,154,.12)";
-      let onStart = null;
-      for (let i = i0; i <= i1; i++) {
-        const s = ss[i], v = getVal(s, t);
-        if (v && onStart == null) onStart = seqToX(s.seq);
-        if (!v && onStart != null) { ctx.fillRect(Math.max(x0, onStart), y + 4, seqToX(s.seq) - Math.max(x0, onStart), rowH - 9); onStart = null; }
-      }
-      if (onStart != null) ctx.fillRect(Math.max(x0, onStart), y + 4, seqToX(nowSeq) - Math.max(x0, onStart), rowH - 9);
     } else {
       let mn = Infinity, mx = -Infinity;
       for (let i = i0; i <= i1; i++) { const v = getVal(ss[i], t); if (v < mn) mn = v; if (v > mx) mx = v; }
@@ -724,8 +783,15 @@ function drawWave() {
       ctx.fillStyle = "#55606f"; ctx.font = "9px ui-monospace, monospace"; ctx.textAlign = "right";
       ctx.fillText(String(mx), LBL_W - 6, y + 32); ctx.fillText(String(mn), LBL_W - 6, y + rowH - 8); ctx.textAlign = "left";
       ctx.strokeStyle = "#ffd35c"; ctx.lineWidth = 1.5; ctx.beginPath();
-      let first = true;
-      for (let i = i0; i <= i1; i++) { const s = ss[i], x = seqToX(s.seq), yy = yOf(getVal(s, t)); if (x < x0) continue; first ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); first = false; }
+      if (dense) {
+        const npx = Math.ceil(PW) + 1, lo = new Float64Array(npx).fill(Infinity), hi = new Float64Array(npx).fill(-Infinity);
+        for (let i = i0; i <= i1; i++) { const s = ss[i], v = getVal(s, t), p = Math.floor(seqToX(s.seq) - x0); if (p < 0 || p >= npx) continue; if (v < lo[p]) lo[p] = v; if (v > hi[p]) hi[p] = v; }
+        let first = true;
+        for (let p = 0; p < npx; p++) { if (lo[p] === Infinity) continue; const x = x0 + p; if (first) { ctx.moveTo(x, yOf(lo[p])); first = false; } ctx.lineTo(x, yOf(hi[p])); ctx.lineTo(x, yOf(lo[p])); }
+      } else {
+        let first = true;
+        for (let i = i0; i <= i1; i++) { const s = ss[i], x = seqToX(s.seq), yy = yOf(getVal(s, t)); if (x < x0) continue; first ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); first = false; }
+      }
       ctx.stroke();
     }
     ctx.lineWidth = 1;
@@ -746,11 +812,12 @@ function findSeq(seq) {
   while (lo < hi) { const m = (lo + hi) >> 1; if (ss[m].seq < seq) lo = m + 1; else hi = m; }
   return lo;
 }
-waveCv.addEventListener("mousemove", (e) => { const r = waveCv.getBoundingClientRect(); state.cursorX = e.clientX - r.left; });
-waveCv.addEventListener("mouseleave", () => { state.cursorX = null; });
+waveCv.addEventListener("mousemove", (e) => { const r = waveCv.getBoundingClientRect(); state.cursorX = e.clientX - r.left; state.dirty = true; });
+waveCv.addEventListener("mouseleave", () => { state.cursorX = null; state.dirty = true; });
+window.addEventListener("resize", () => { state.dirty = true; });
 waveCv.addEventListener("click", () => togglePause());
 function togglePause() {
-  state.paused = !state.paused;
+  state.paused = !state.paused; state.dirty = true;
   if (state.paused && state.latest) state.pauseSeq = state.latest.seq;
   $("b-pause").textContent = state.paused ? "▶ 波形再開" : "⏸ 波形停止";
   $("b-pause").classList.toggle("active", state.paused);
@@ -902,13 +969,20 @@ function drawLine() {
 // ---------------------------------------------------------------------------
 // 描画ループ
 // ---------------------------------------------------------------------------
-function raf() { try { drawWave(); drawLine(); } catch (e) { console.error(e); } requestAnimationFrame(raf); }
+let lastDraw = 0;
+function raf(ts) {
+  if (state.dirty && ts - lastDraw >= 30) {
+    state.dirty = false; lastDraw = ts;
+    try { drawWave(); drawLine(); } catch (e) { console.error(e); }
+  }
+  requestAnimationFrame(raf);
+}
 
 // ---------------------------------------------------------------------------
 // ボタン
 // ---------------------------------------------------------------------------
 $("b-pause").onclick = togglePause;
-$("sel-win").onchange = (e) => { state.winSec = parseFloat(e.target.value); };
+$("sel-win").onchange = (e) => { state.winSec = parseFloat(e.target.value); state.dirty = true; };
 $("b-release").onclick = () => send({type: "release_all"});
 $("b-simreset").onclick = () => send({type: "sim_reset"});
 $("b-simtoggle").onclick = () => send({type: "sim_enable", value: !(state.stat && state.stat.sim_enabled)});
