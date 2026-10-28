@@ -151,3 +151,6 @@ label { color: var(--dim); font-size: 11px; cursor: pointer; }
 body.light .chip.chg { animation: none; }
 body.light table.words td.sp canvas { opacity: .3; }
 .ev .sup { color: var(--dim); }
+#s-diag-wrap { cursor: pointer; } #s-proc { min-width: 4ch; }
+#diag-text { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--panel2); padding: 8px; border-radius: 4px; margin: 0; }
+#diag-modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 20; display: flex; align-items: center; justify-content: center; }

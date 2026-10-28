@@ -21,6 +21,7 @@
     <div class="stat"><span class="k">配信</span><span class="v"><b id="s-fps">-</b><i>fps</i></span></div>
     <div class="stat"><span class="k">遅延</span><span class="v"><b id="s-lat">-</b><i>ms</i></span></div>
     <div class="stat"><span class="k">記録</span><span class="v"><b id="s-rec">-</b><i>s</i></span></div>
+    <div class="stat" id="s-diag-wrap" title="クリックで診断 (ブラウザ側の処理時間など)"><span class="k">処理</span><span class="v"><b id="s-proc">-</b><i>ms</i></span></div>
   </div>
   <div class="hbtns">
     <button id="b-pause" title="波形を一時停止 (Space)">⏸ 波形停止</button>
@@ -107,6 +108,13 @@
     <h3>表示するデバイス <span class="right"><input id="vis-filter" placeholder="絞込み"> <button id="vis-all" class="small">全て</button> <button id="vis-none" class="small">なし</button> <button id="vis-close" class="small">閉じる</button></span></h3>
     <p class="dim">チェックを外したデバイスはパネルに表示されません (記録・波形追加は可能)。設定はこのブラウザに保存されます。</p>
     <div id="vis-list"></div>
+  </div>
+</div>
+<div id="diag-modal" class="hidden">
+  <div class="mbox">
+    <h3>診断 <span class="right"><button id="diag-copy" class="small">コピー</button><button id="diag-close" class="small">閉じる</button></span></h3>
+    <p class="dim">重いときはこの内容をコピーして貼ってください。1 秒ごとに更新します。</p>
+    <pre id="diag-text"></pre>
   </div>
 </div>
 <div id="scan-modal" class="hidden">

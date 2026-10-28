@@ -55,12 +55,12 @@ function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.
 // ---------------------------------------------------------------------------
 // WebSocket
 // ---------------------------------------------------------------------------
-let ws = null, wsRetry = 500;
+let ws = null, wsRetry = 500, ev_len_hint = 0;
 function connect() {
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
   ws = new WebSocket(url);
   ws.onopen = () => { wsRetry = 500; $("status").textContent = "接続中…"; pingLoop(); };
-  ws.onmessage = (ev) => onMessage(JSON.parse(ev.data));
+  ws.onmessage = (ev) => { ev_len_hint = ev.data.length; onMessage(JSON.parse(ev.data)); };
   ws.onclose = () => {
     $("led").className = "led"; $("status").textContent = "サーバ切断 - 再接続中";
     setTimeout(connect, wsRetry); wsRetry = Math.min(5000, wsRetry * 1.5);
@@ -82,6 +82,7 @@ function onMessage(m) {
   if (m.type !== "frame") return;
   const t0 = performance.now();
   state.wsCount++;
+  diag.samples += m.samples.length; diag.bytes += ev_len_hint;
   for (const s of m.samples) pushSample(s, true);
   state.sim = m.sim; state.stat = m.stat; state.forces = m.forces;
   if (m.stat && m.stat.cycle_ms && state.cfg && m.stat.cycle_ms !== state.cfg.cycle_ms) {
@@ -583,6 +584,8 @@ function updateHeader(m) {
   $("s-rw").textContent = `${fx(st.read_ms, 2, 5)} / ${fx(st.step_ms, 2, 5)} / ${fx(st.write_ms, 2, 5)}`;
   $("s-lat").textContent = fx(state.latency, 0, 4);
   $("s-rec").textContent = fx(state.samples.length * state.cfg.cycle_ms / 1000, 0, 3);
+  $("s-proc").textContent = fx(procEma, 1, 4);
+  $("s-proc").style.color = procEma > 20 ? "var(--err)" : procEma > 8 ? "var(--force)" : "";
   fpsCount++;
   const now = performance.now();
   if (now - fpsLast > 1000) { state.wsFps = fpsCount * 1000 / (now - fpsLast); fpsCount = 0; fpsLast = now; $("s-fps").textContent = state.wsFps.toFixed(0).padStart(2, " "); }
@@ -636,7 +639,7 @@ function addEvent(e) {
   }
   state.events.push(e);
   if (state.events.length > 500) state.events.shift();
-  evQueue.push(e);
+  evQueue.push(e); diag.events++;
 }
 function flushEvents() {
   if (!evQueue.length) return;
@@ -995,10 +998,14 @@ function drawLine() {
 // ---------------------------------------------------------------------------
 // 描画ループ
 // ---------------------------------------------------------------------------
-let lastDraw = 0, procEma = 0;
+let lastDraw = 0, procEma = 0, procMax = 0, drawEma = 0;
+const diag = {frames: 0, samples: 0, events: 0, bytes: 0, t0: performance.now(), longTasks: 0, longMs: 0};
+try { new PerformanceObserver((l) => { for (const e of l.getEntries()) { diag.longTasks++; diag.longMs += e.duration; } }).observe({entryTypes: ["longtask"]}); } catch (e) { /* 未対応ブラウザ */ }
 function perfTrack(t0) {
   const d = performance.now() - t0;
   procEma = procEma * 0.9 + d * 0.1;
+  if (d > procMax) procMax = d;
+  diag.frames++;
   if (!state.lightManual) {
     if (!state.light && procEma > 20) setLight(true, true);
     else if (state.light && procEma < 6) setLight(false, true);
@@ -1015,7 +1022,9 @@ function raf(ts) {
   const minGap = state.light ? 200 : 66;          // 軽量: 5fps, 通常: 15fps (波形は 15fps で十分)
   if (state.dirty && ts - lastDraw >= minGap) {
     state.dirty = false; lastDraw = ts;
+    const t0 = performance.now();
     try { drawWave(); drawLine(); } catch (e) { console.error(e); }
+    drawEma = drawEma * 0.9 + (performance.now() - t0) * 0.1;
   }
   requestAnimationFrame(raf);
 }
@@ -1025,6 +1034,24 @@ function raf(ts) {
 // ---------------------------------------------------------------------------
 $("b-pause").onclick = togglePause;
 $("b-light").onclick = () => setLight(!state.light, false);
+function diagText() {
+  const el = (performance.now() - diag.t0) / 1000;
+  const mem = performance.memory ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} MB` : "n/a";
+  return [
+    `時刻: ${new Date().toLocaleString()}   経過 ${el.toFixed(0)} 秒`,
+    `設定: ${state.cfg ? state.cfg.title : "-"}  周期 ${state.cfg ? state.cfg.cycle_ms : "-"}ms  タグ ${state.tags.length} (表示 ${state.tags.length - state.hidden.size})  波形ch ${state.wave.length}  窓 ${state.winSec}s`,
+    `受信: ${(diag.frames / el).toFixed(1)} frame/s  ${(diag.samples / el).toFixed(0)} sample/s  ${(diag.bytes / el / 1024).toFixed(0)} KB/s  イベント ${(diag.events / el).toFixed(1)}/s`,
+    `処理: 受信1回あたり 平均 ${procEma.toFixed(1)}ms 最大 ${procMax.toFixed(0)}ms   描画1回 ${drawEma.toFixed(1)}ms   50ms超タスク ${diag.longTasks} 回 / 計 ${diag.longMs.toFixed(0)}ms`,
+    `記録: ${state.samples.length} サンプル   JSヒープ ${mem}   軽量モード ${state.light ? "ON" + (state.lightManual ? " (手動)" : " (自動)") : "OFF"}`,
+    `画面: ${window.innerWidth}x${window.innerHeight}  DPR ${window.devicePixelRatio}  波形canvas ${waveCv.width}x${waveCv.height}  CPUコア ${navigator.hardwareConcurrency || "?"}  ${navigator.userAgent.split(") ")[0]})`,
+    `PLC: ${state.stat ? `${state.stat.status} 周期 ${state.stat.period_ms}ms 読/計/書 ${state.stat.read_ms}/${state.stat.step_ms}/${state.stat.write_ms}ms ジッタ ${JSON.stringify(state.stat.jitter)}` : "-"}  遅延 ${state.latency.toFixed(0)}ms`,
+  ].join("\n");
+}
+let diagTimer = null;
+$("s-diag-wrap").onclick = () => { $("diag-modal").classList.remove("hidden"); $("diag-text").textContent = diagText(); clearInterval(diagTimer); diagTimer = setInterval(() => { $("diag-text").textContent = diagText(); }, 1000); };
+$("diag-close").onclick = () => { $("diag-modal").classList.add("hidden"); clearInterval(diagTimer); };
+$("diag-modal").onclick = (e) => { if (e.target.id === "diag-modal") { $("diag-modal").classList.add("hidden"); clearInterval(diagTimer); } };
+$("diag-copy").onclick = async () => { try { await navigator.clipboard.writeText(diagText()); $("diag-copy").textContent = "コピーしました"; setTimeout(() => $("diag-copy").textContent = "コピー", 1500); } catch (e) { alert("コピーできませんでした。テキストを選択してコピーしてください"); } };
 $("sel-win").onchange = (e) => { state.winSec = parseFloat(e.target.value); state.dirty = true; };
 $("b-release").onclick = () => send({type: "release_all"});
 $("b-simreset").onclick = () => send({type: "sim_reset"});
