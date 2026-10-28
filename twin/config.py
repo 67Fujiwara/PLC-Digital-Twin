@@ -73,9 +73,10 @@ class Tag:
     ref: Ref
     comment: str = ""
     address: str = ""     # PLC上の実アドレス表記 (表示用)
+    group: str = ""       # ブロック名 (クロスリファレンスのプログラム名など。空なら自動分け)
 
     def to_dict(self) -> dict:
-        d = {"name": self.name, "comment": self.comment, "address": self.address}
+        d = {"name": self.name, "comment": self.comment, "address": self.address, "group": self.group}
         d.update(self.ref.to_dict())
         return d
 
@@ -88,6 +89,7 @@ class WatchSpec:
     offset: int = 0       # watch ワード配列内の先頭オフセット
     bits: bool = False    # ビットデバイスか (表示をビット展開)
     names: list[str] = field(default_factory=list)
+    groups: list[str] = field(default_factory=list)   # names と同じ並びでブロック名 (任意)
     source: str = ""      # "import" = CSV 取込 (.tags.yaml) 由来
     error: str = ""       # 読めなかったときの理由 (実行時に付く。空なら正常)
 
@@ -266,7 +268,7 @@ def _parse_tag(block: str, d: dict, plc_type: str, spec: BlockSpec | None, watch
                 else:
                     address = word_address(plc_type, w.dev, w.addr, off)
                 break
-    return Tag(name, ref, comment, address)
+    return Tag(name, ref, comment, address, str(d.get("group", "")))
 
 
 def _normalize_keys(d: dict) -> dict:
@@ -395,7 +397,8 @@ def parse_config(raw: dict) -> TwinConfig:
         words = int(w.get("words", 1))
         bits = bool(w.get("bits", is_bit_device(plc_type, dev)))
         names = [str(n) for n in (w.get("names") or [])]
-        watch.append(WatchSpec(dev, int(addr), words, off, bits, names, str(w.get("source", ""))))
+        groups_ = [str(n) for n in (w.get("groups") or [])]
+        watch.append(WatchSpec(dev, int(addr), words, off, bits, names, groups_, str(w.get("source", ""))))
         off += words
     watch_words = off
     watch_every = int(raw.get("watch_every", 2))
@@ -413,13 +416,15 @@ def parse_config(raw: dict) -> TwinConfig:
                 for b in range(16):
                     nm = w.names[i * 16 + b] if i * 16 + b < len(w.names) else bit_address(plc_type, w.dev, w.addr, i, b)
                     if nm:
+                        g = w.groups[i * 16 + b] if i * 16 + b < len(w.groups) else ""
                         tags["watch"].append(Tag(nm, Ref("watch", "bit", w.offset + i, b, "u16", nm),
-                                                 "", bit_address(plc_type, w.dev, w.addr, i, b)))
+                                                 "", bit_address(plc_type, w.dev, w.addr, i, b), g))
             else:
                 nm = w.names[i] if i < len(w.names) else word_address(plc_type, w.dev, w.addr, i)
                 if nm:
+                    g = w.groups[i] if i < len(w.groups) else ""
                     tags["watch"].append(Tag(nm, Ref("watch", "word", w.offset + i, 0, "u16", nm),
-                                             "", word_address(plc_type, w.dev, w.addr, i)))
+                                             "", word_address(plc_type, w.dev, w.addr, i), g))
     for d in tags_raw.get("watch") or []:
         tags["watch"].append(_parse_tag("watch", d, plc_type, None, watch))
 

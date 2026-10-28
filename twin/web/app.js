@@ -23,6 +23,8 @@ const state = {
   dirty: true, light: false, lightManual: false,
   hidden: new Set(),    // 非表示タグ (tag key)
   watchEntries: [],     // 監視デバイス一覧 (編集用)
+  groups: [],           // ブロック [{name, keys, auto, collapsed}]
+  groupOf: new Map(),   // tag key -> group index
 };
 
 // ---------------------------------------------------------------------------
@@ -101,8 +103,10 @@ function onMessage(m) {
       return;
     }
     $("ver").textContent = `v${m.version || "?"} (${(m.build || "").slice(0, 7)})`;
+    state.groups = m.groups || [];
     setup(m.config); return;
   }
+  if (m.type === "groups") { state.groups = m.groups || []; buildDevices(); return; }
   if (m.type === "error") { addLog({t: Date.now() / 1000, level: "error", msg: m.msg}); alert(m.msg); return; }
   if (m.type === "pong") { state.latency = performance.now() - m.t; return; }
   if (m.type === "history") { for (const s of m.samples) pushSample(s, false); state.prev = state.latest; state.dirty = true; return; }
@@ -153,12 +157,9 @@ function setup(cfg) {
     const nw = (t.dtype === "u32" || t.dtype === "s32") ? 2 : 1;
     for (let w = t.word; w < t.word + nw; w++) { const m = state.wordIdx[b]; if (!m.has(w)) m.set(w, []); m.get(w).push(t); }
   }
-  $("h-out").textContent = `${cfg.out.dev}${cfg.out.addr} × ${cfg.out.words}w`;
-  $("h-in").textContent = `${cfg.in.dev}${cfg.in.addr} × ${cfg.in.words}w`;
   $("h-watch").textContent = cfg.watch.length > 6
     ? `${cfg.watch.length} エントリ / ${cfg.watch_words} ワード`
     : (cfg.watch.map(w => `${w.dev}${w.addr}×${w.words}w`).join(", ") || "なし");
-  $("p-watch").classList.toggle("hidden", !cfg.watch.length);
   state.watchEntries = cfg.watch.map(w => ({dev: w.dev, addr: w.addr, words: w.words, names: w.names, bits: w.bits, source: w.source, error: w.error}));
   loadHidden();
   buildDevices();
@@ -415,16 +416,103 @@ const dom = {chips: new Map(), rows: new Map(), raw: {out: [], in: []}};
 
 function buildDevices() {
   dom.chips.clear(); dom.rows.clear();
-  for (const b of ["out", "in", "watch"]) {
-    const bits = $(`bits-${b}`), words = $(`words-${b}`);
-    bits.innerHTML = ""; words.innerHTML = "";
-    for (const t of state.cfg.tags[b] || []) {
-      if (t.kind === "bit") bits.appendChild(makeChip(t));
-      else words.appendChild(makeRow(t));
+  state.groupOf.clear();
+  const box = $("groups"); box.innerHTML = "";
+  // ブロックに入っていないタグは末尾の「未分類」へ
+  const assigned = new Set();
+  state.groups.forEach((g, gi) => g.keys.forEach(k => { assigned.add(k); state.groupOf.set(k, gi); }));
+  const rest = state.tags.map(tagKey).filter(k => !assigned.has(k));
+  const groups = rest.length ? [...state.groups, {name: "未分類", keys: rest, auto: true}] : state.groups;
+  groups.forEach((g, gi) => {
+    const tags = g.keys.map(k => state.tagByKey.get(k)).filter(Boolean);
+    if (!tags.length && g.auto) return;
+    const sec = el("div", "grp" + (g.collapsed ? " collapsed" : "")); sec.dataset.gi = gi;
+    const h = el("h2");
+    h.appendChild(el("span", "tri", g.collapsed ? "▸" : "▾"));
+    h.appendChild(el("span", "gname", g.name || `ブロック ${gi + 1}`));
+    h.appendChild(el("span", "cnt", `${tags.length}`));
+    const right = el("span", "right");
+    const bw = el("button", "small", "波形に登録"); bw.title = "このブロックの全デバイスを波形 (タイミングチャート) に追加/解除";
+    bw.onclick = (e) => { e.stopPropagation(); toggleGroupWave(g); };
+    bw.classList.toggle("on", tags.length > 0 && tags.every(t => state.wave.includes(tagKey(t))));
+    right.appendChild(bw);
+    const bn = el("button", "small", "名前"); bn.title = "ブロック名を変更";
+    bn.onclick = (e) => { e.stopPropagation(); const n = prompt("ブロック名", g.name); if (n != null && n.trim()) { g.name = n.trim(); saveGroups(); } };
+    right.appendChild(bn);
+    const bu = el("button", "small", "▲"); bu.title = "上へ"; bu.onclick = (e) => { e.stopPropagation(); moveGroup(gi, -1); };
+    const bd = el("button", "small", "▼"); bd.title = "下へ"; bd.onclick = (e) => { e.stopPropagation(); moveGroup(gi, 1); };
+    right.appendChild(bu); right.appendChild(bd);
+    h.appendChild(right);
+    h.onclick = () => { g.collapsed = !g.collapsed; sec.classList.toggle("collapsed", g.collapsed); h.firstChild.textContent = g.collapsed ? "▸" : "▾"; saveGroups(true); };
+    sec.appendChild(h);
+    const bits = el("div", "bits"), words = el("table", "words");
+    for (const t of tags) {
+      if (t.kind === "bit") { const c = makeChip(t); c.classList.add("b-" + t.block); bits.appendChild(c); }
+      else { const r = makeRow(t); r.classList.add("b-" + t.block); words.appendChild(r); }
     }
-  }
+    if (bits.children.length) sec.appendChild(bits);
+    if (words.children.length) sec.appendChild(words);
+    // ドロップ先 (Shift+クリックで移動元を選ぶ代わりにドラッグも可)
+    sec.ondragover = (e) => { e.preventDefault(); sec.classList.add("drop"); };
+    sec.ondragleave = () => sec.classList.remove("drop");
+    sec.ondrop = (e) => { e.preventDefault(); sec.classList.remove("drop"); const k = e.dataTransfer.getData("text/tagkey"); if (k) moveTagToGroup(k, gi); };
+    box.appendChild(sec);
+  });
+  if (!groups.length) box.appendChild(el("div", "dim", "デバイスがありません。「CSV 取込」か「全デバイス読込」で追加してください"));
   applyHidden();
 }
+
+// ---------------------------------------------------------------------------
+// ブロック操作 (移動・並べ替え・波形一括登録・保存)
+// ---------------------------------------------------------------------------
+function realGroups() { return state.groups; }
+function ensureGroupsEditable() {
+  // 未分類のタグも含めて現在の表示どおりに state.groups を確定させる (保存のため)
+  const assigned = new Set(); state.groups.forEach(g => g.keys.forEach(k => assigned.add(k)));
+  const rest = state.tags.map(tagKey).filter(k => !assigned.has(k));
+  if (rest.length) state.groups.push({name: "未分類", keys: rest, auto: false});
+}
+let saveTimer = null;
+function saveGroups(quiet) {
+  ensureGroupsEditable();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    const r = await fetch("/api/groups", {method: "PUT", body: JSON.stringify({groups: state.groups.map(g => ({name: g.name, keys: g.keys, collapsed: !!g.collapsed, keep: !!g.keep && !g.keys.length}))})});
+    if (!r.ok) alert("ブロックの保存に失敗しました");
+  }, quiet ? 800 : 100);
+  buildDevices();
+}
+function moveGroup(gi, d) {
+  ensureGroupsEditable();
+  const j = gi + d; if (j < 0 || j >= state.groups.length) return;
+  [state.groups[gi], state.groups[j]] = [state.groups[j], state.groups[gi]];
+  saveGroups();
+}
+function moveTagToGroup(key, gi) {
+  ensureGroupsEditable();
+  for (const g of state.groups) { const i = g.keys.indexOf(key); if (i >= 0) g.keys.splice(i, 1); }
+  if (gi === -1) { const n = prompt("新しいブロック名"); if (!n) { buildDevices(); return; } state.groups.push({name: n.trim(), keys: [key], auto: false}); }
+  else state.groups[gi].keys.push(key);
+  state.groups = state.groups.filter(g => g.keys.length || g.keep);
+  saveGroups();
+}
+function askMoveTag(key) {
+  ensureGroupsEditable();
+  const names = state.groups.map((g, i) => `${i + 1}: ${g.name}`).join("\n");
+  const ans = prompt(`「${key.split(".").slice(1).join(".")}」の移動先。番号を入力 (0 = 新しいブロック)\n${names}`);
+  if (ans == null) return;
+  const n = parseInt(ans, 10);
+  if (n === 0) moveTagToGroup(key, -1);
+  else if (n >= 1 && n <= state.groups.length) moveTagToGroup(key, n - 1);
+}
+function toggleGroupWave(g) {
+  const keys = g.keys.filter(k => state.tagByKey.has(k));
+  const all = keys.every(k => state.wave.includes(k));
+  if (all) { state.wave = state.wave.filter(k => !keys.includes(k)); keys.forEach(k => mip.ch.delete(k)); }
+  else { for (const k of keys) if (!state.wave.includes(k)) { state.wave.push(k); mipBuild(k); } }
+  saveWave(); state.dirty = true; buildDevices();
+}
+$("b-grp-new").onclick = () => { ensureGroupsEditable(); const n = prompt("新しいブロック名 (作ったら Shift+クリック か ドラッグでデバイスを入れる)"); if (n && n.trim()) { state.groups.push({name: n.trim(), keys: [], auto: false, keep: true}); saveGroups(); } };
 
 function makeChip(t) {
   const key = tagKey(t);
@@ -444,7 +532,8 @@ function makeChip(t) {
     rel.onclick = (e) => { e.stopPropagation(); send({type: "force_bit", block: t.block, word: t.word, bit: t.bit, value: null}); };
     c.appendChild(rel);
   }
-  c.onclick = () => toggleWave(key);
+  c.onclick = (e) => { if (e.shiftKey) askMoveTag(key); else toggleWave(key); };
+  c.draggable = true; c.ondragstart = (e) => e.dataTransfer.setData("text/tagkey", key);
   dom.chips.set(key, c);
   return c;
 }
@@ -503,7 +592,8 @@ function makeRow(t) {
   tr.appendChild(ed);
   const r = {tr, val, hx, cv, last: null, visible: false, editing: false, chg: false, cls: ""};
   sparkObserver.observe(tr); tr._row = r;
-  tr.onclick = () => toggleWave(key);
+  tr.onclick = (e) => { if (e.shiftKey) askMoveTag(key); else toggleWave(key); };
+  tr.draggable = true; tr.ondragstart = (e) => e.dataTransfer.setData("text/tagkey", key);
   dom.rows.set(key, r);
   return tr;
 }
@@ -537,7 +627,7 @@ function updateDevices() {
       const fk = `${t.block}.${t.word}.${t.bit}`;
       const f = forcedBits.has(fk);
       // クラス文字列を組み立てて、変わったときだけ DOM に触る
-      const cls = "chip" + (on ? " on" : "") + (f ? (forcedBitVal.get(fk) ? " forced fon" : " forced foff") : "") + (waveSet.has(key) ? " sel" : "");
+      const cls = "chip b-" + t.block + (on ? " on" : "") + (f ? (forcedBitVal.get(fk) ? " forced fon" : " forced foff") : "") + (waveSet.has(key) ? " sel" : "") + (state.hidden.has(key) ? " hidden" : "");
       if (c._cls !== cls) {
         const flash = !state.light && c._cls !== undefined && (c._on !== on);
         c.className = cls + (flash ? " chg" : "");
@@ -554,7 +644,7 @@ function updateDevices() {
       } else if (r.chg && now - (state.changedAt.get(key) || 0) > 400) {
         r.val.classList.remove("chg"); r.chg = false; state.changedAt.delete(key);
       }
-      const cls = (forcedWords.has(`${t.block}.${t.word}`) ? "forced " : "") + (waveSet.has(key) ? "sel" : "");
+      const cls = "b-" + t.block + (forcedWords.has(`${t.block}.${t.word}`) ? " forced" : "") + (waveSet.has(key) ? " sel" : "");
       if (r.cls !== cls) { r.tr.className = cls; r.cls = cls; }
     }
   }
@@ -723,6 +813,11 @@ function toggleWave(key) {
   if (i >= 0) { state.wave.splice(i, 1); mip.ch.delete(key); } else { state.wave.push(key); mipBuild(key); }
   state.dirty = true;
   saveWave(); updateDevices();
+  for (const sec of document.querySelectorAll("#groups .grp")) {
+    const gi = +sec.dataset.gi; const g = (state.groups[gi]); if (!g) continue;
+    const keys = g.keys.filter(k => state.tagByKey.has(k));
+    sec.querySelector("h2 .right button").classList.toggle("on", keys.length > 0 && keys.every(k => state.wave.includes(k)));
+  }
 }
 
 const waveCv = $("wave"), lineCv = $("line");
@@ -768,9 +863,23 @@ function mipPush(s) {
   for (const k of state.wave) { const t = state.tagByKey.get(k); if (t) mipAdd(mipSlot(k), t, s); }
 }
 
+const SEP_H = 14;
+function waveRows() {
+  // ブロック順 → ブロック内は登録順。ブロックが変わるところに見出し行
+  const order = state.wave.map(k => ({k, gi: state.groupOf.has(k) ? state.groupOf.get(k) : 1e9}));
+  order.sort((a, b) => a.gi - b.gi || state.wave.indexOf(a.k) - state.wave.indexOf(b.k));
+  const rows = []; let last = null;
+  for (const o of order) {
+    const t = state.tagByKey.get(o.k); if (!t) continue;
+    if (state.groups.length && o.gi !== last) { rows.push({sep: o.gi < 1e9 ? (state.groups[o.gi] || {}).name || "" : "未分類"}); last = o.gi; }
+    rows.push(t);
+  }
+  return rows;
+}
 function drawWave() {
-  const chans = state.wave.map(k => state.tagByKey.get(k)).filter(Boolean);
-  const hgt = AXIS_H + chans.reduce((a, t) => a + (t.kind === "bit" ? DIG_H : ANA_H), 0) + 6;
+  const rows = waveRows();
+  const chans = rows.filter(r => !r.sep);
+  const hgt = AXIS_H + rows.reduce((a, r) => a + (r.sep ? SEP_H : (r.kind === "bit" ? DIG_H : ANA_H)), 0) + 6;
   const [ctx, W, H] = resizeCanvas(waveCv, Math.max(80, hgt));
   ctx.clearRect(0, 0, W, H);
   const ss = state.samples; if (!ss.length || !state.cfg) { ctx.fillStyle = "#555"; ctx.fillText("波形: デバイスをクリックして追加", 10, 20); return; }
@@ -798,7 +907,13 @@ function drawWave() {
   if (state.cursorX != null && state.cursorX > x0) curSeq = Math.round(nowSeq - (x0 + PW - state.cursorX) / px);
   const tip = [];
   let y = AXIS_H;
-  for (const t of chans) {
+  for (const t of rows) {
+    if (t.sep) {
+      ctx.fillStyle = "#1a2029"; ctx.fillRect(0, y, W, SEP_H - 1);
+      ctx.fillStyle = "#8a97a8"; ctx.font = "bold 10px system-ui, sans-serif"; ctx.textBaseline = "middle"; ctx.textAlign = "left";
+      ctx.fillText(t.sep, 6, y + SEP_H / 2);
+      y += SEP_H; continue;
+    }
     const dig = t.kind === "bit";
     const rowH = dig ? DIG_H : ANA_H;
     ctx.fillStyle = "#121620"; ctx.fillRect(0, y, LBL_W - 2, rowH - 1);

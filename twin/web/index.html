@@ -46,17 +46,7 @@
 
 <main id="main">
   <section id="col-dev" class="col">
-    <div class="panel" id="p-out">
-      <h2>PLC → PC <span class="sub" id="h-out"></span><span class="hint">クリックで波形に追加</span></h2>
-      <div class="bits" id="bits-out"></div>
-      <table class="words" id="words-out"></table>
-    </div>
-    <div class="panel" id="p-in">
-      <h2>PC → PLC <span class="sub" id="h-in"></span><span class="hint">スイッチで強制 ON/OFF</span></h2>
-      <div class="bits" id="bits-in"></div>
-      <table class="words" id="words-in"></table>
-    </div>
-    <div class="panel" id="p-watch">
+    <div class="panel" id="p-watchcfg">
       <h2>監視デバイス <span class="sub" id="h-watch"></span>
         <span class="right">
           <input id="watch-add" placeholder="例: DM100 8 / MR200 2 / D0-D15" title="デバイス 先頭 [ワード数]  または  先頭-末尾。Enter で追加">
@@ -64,9 +54,10 @@
           <button id="b-watch-save" class="small" title="設定ファイルの隣 (<名前>.watch.yaml) に保存し、次回起動時も読む">保存</button>
         </span></h2>
       <div id="watch-list" class="wlist"></div>
-      <div class="bits" id="bits-watch"></div>
-      <table class="words" id="words-watch"></table>
     </div>
+    <div class="legend dim">ブロック: <span class="lg-out">■ PLC→PC</span> <span class="lg-in">■ PC→PLC (スイッチで強制)</span> <span class="lg-watch">■ 監視</span>
+      　クリック=波形に追加　Shift+クリック=別ブロックへ移動　<button id="b-grp-new" class="small">新しいブロック</button></div>
+    <div id="groups"></div>
     <div class="panel" id="p-raw">
       <h2 class="toggle" id="h-raw">▸ 生データ (全ワード hex)</h2>
       <div id="raw" class="hidden">

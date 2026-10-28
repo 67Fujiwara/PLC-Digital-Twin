@@ -154,3 +154,21 @@ body.light table.words td.sp canvas { opacity: .3; }
 #s-diag-wrap { cursor: pointer; } #s-proc { min-width: 4ch; }
 #diag-text { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--panel2); padding: 8px; border-radius: 4px; margin: 0; }
 #diag-modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 20; display: flex; align-items: center; justify-content: center; }
+
+/* ブロック (グループ) */
+.grp { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px 6px; margin-bottom: 6px; }
+.grp h2 { margin: 0; cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: .04em; color: #aab4c3;
+  display: flex; align-items: center; gap: 8px; }
+.grp h2 .tri { width: 12px; display: inline-block; color: var(--dim); }
+.grp h2 .gname { font-weight: 600; color: #d8dde6; }
+.grp h2 .cnt { color: var(--dim); font-weight: 400; font-family: var(--mono); }
+.grp h2 .right button { opacity: .75; } .grp h2 .right button:hover { opacity: 1; }
+.grp h2 .right button.on { background: #2a4a6e; border-color: var(--accent); opacity: 1; }
+.grp.collapsed .bits, .grp.collapsed table.words { display: none; }
+.grp .bits { margin-top: 6px; }
+.chip.b-out .dot { box-shadow: inset 0 0 0 1px #4da3ff55; } .chip.b-out .ad { color: #6fa8e0; }
+.chip.b-in .ad { color: #6fc27a; } .chip.b-watch .ad { color: #c8b46a; }
+table.words tr.b-out td.ad { color: #6fa8e0; } table.words tr.b-in td.ad { color: #6fc27a; } table.words tr.b-watch td.ad { color: #c8b46a; }
+.legend { font-size: 11px; margin: 2px 0 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.lg-out { color: #6fa8e0; } .lg-in { color: #6fc27a; } .lg-watch { color: #c8b46a; }
+.grp.drop { outline: 1px dashed var(--accent); }

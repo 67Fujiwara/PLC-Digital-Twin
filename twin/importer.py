@@ -37,6 +37,7 @@ DEV_KEYS = ("割付", "デバイス", "device", "assign")
 TYPE_KEYS = ("データ型", "data type", "type", "型")
 COMMENT_KEYS = ("コメント", "comment", "説明")
 CLASS_KEYS = ("クラス", "class")
+GROUP_KEYS = ("プログラム", "モジュール", "ユニット名", "program", "module", "ブロック", "グループ")
 
 DTYPE_MAP = {
     "bool": "bit", "bit": "bit", "ビット": "bit", "b": "bit",
@@ -60,6 +61,7 @@ class Label:
     num: int = 0
     bit: int | None = None   # ワードデバイスのビット指定 (DM1000.5 / D1000.3)
     row: int = 0
+    group: str = ""          # プログラム名など (クロスリファレンス CSV)
 
 
 @dataclass
@@ -120,6 +122,7 @@ def parse_labels(text: str) -> list[Label]:
     ci_name, ci_dev, ci_type, ci_cmt, ci_cls = (_find_col(h, NAME_KEYS), _find_col(h, DEV_KEYS),
                                                 _find_col(h, TYPE_KEYS), _find_col(h, COMMENT_KEYS),
                                                 _find_col(h, CLASS_KEYS))
+    ci_grp = _find_col(h, GROUP_KEYS)
     # "デバイス名, コメント" 形式 (名前列なし) は名前 = コメント
     for n, r in enumerate(rows[hdr_i + 1:]):
         get = lambda i: (r[i].strip() if i is not None and i < len(r) else "")  # noqa: E731
@@ -135,8 +138,21 @@ def parse_labels(text: str) -> list[Label]:
             name = comment or dev
         if not dev and not name:
             continue
-        labels.append(Label(name, dev, dtype, comment if comment != name else "", row=hdr_i + n + 2))
-    return labels
+        labels.append(Label(name, dev, dtype, comment if comment != name else "", row=hdr_i + n + 2, group=get(ci_grp)))
+    # 同じデバイスが複数行 (クロスリファレンス: 使用箇所ごと) → 1 行にまとめ、プログラム名は最初のもの
+    merged: dict[str, Label] = {}
+    out: list[Label] = []
+    for lb in labels:
+        key = lb.device.upper() if lb.device else f"#{lb.row}"
+        if key in merged:
+            if not merged[key].group and lb.group:
+                merged[key].group = lb.group
+            if not merged[key].comment and lb.comment:
+                merged[key].comment = lb.comment
+            continue
+        merged[key] = lb
+        out.append(lb)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -225,14 +241,16 @@ def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec,
             if dev == spec.dev and not bitdev and spec.addr <= num < spec.addr + spec.words:
                 w = num - spec.addr
                 if dtype == "bit":
-                    res.tags[block].append({"name": name, "bit": f"{w}.{wbit or 0}", "comment": lb.comment})
+                    d = {"name": name, "bit": f"{w}.{wbit or 0}", "comment": lb.comment}
                 else:
                     d = {"name": name, "word": w}
                     if dtype != "u16":
                         d["type"] = dtype
                     if lb.comment:
                         d["comment"] = lb.comment
-                    res.tags[block].append(d)
+                if lb.group:
+                    d["group"] = lb.group
+                res.tags[block].append(d)
                 placed = True
                 break
         if placed:
@@ -248,14 +266,18 @@ def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec,
             else:
                 key = (dev, (num // 16) * 16)
                 bit = num % 16
-            e = watch_words.setdefault(key, {"bits": True, "names": {}})
+            e = watch_words.setdefault(key, {"bits": True, "names": {}, "groups": {}})
             e["names"][bit] = name
+            if lb.group:
+                e["groups"][bit] = lb.group
         else:
             if dtype == "bit":
                 res.skipped.append((lb.name, f"ワードデバイスのビット指定 ({lb.device}) は watch では未対応 (out/in ブロック内なら可)"))
                 continue
-            e = watch_words.setdefault((dev, num), {"bits": False, "names": {}, "dtype": dtype})
+            e = watch_words.setdefault((dev, num), {"bits": False, "names": {}, "groups": {}, "dtype": dtype})
             e["names"][0] = name
+            if lb.group:
+                e["groups"][0] = lb.group
             if dtype in ("u32", "s32"):
                 watch_words.setdefault((dev, num + 1), {"bits": False, "names": {}, "dtype": "u16"})
     if sys_skipped:
@@ -277,14 +299,19 @@ def build(labels: list[Label], plc_type: str, out: BlockSpec, inp: BlockSpec,
         for g in groups:
             words = (g[-1] - g[0]) // step + 1
             names: list[str] = []
+            grps: list[str] = []
             for i in range(words):
                 a = g[0] + i * step
                 e = watch_words.get((dev, a))
                 if bits:
                     names += [(e["names"].get(b, "") if e else "") for b in range(16)]
+                    grps += [(e.get("groups", {}).get(b, "") if e else "") for b in range(16)]
                 else:
                     names.append(e["names"].get(0, "") if e else "")
+                    grps.append(e.get("groups", {}).get(0, "") if e else "")
             entry = {"dev": dev, "addr": g[0], "words": words, "bits": bits, "names": names}
+            if any(grps):
+                entry["groups"] = grps
             res.watch.append(entry)
     return res
 

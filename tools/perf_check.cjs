@@ -6,7 +6,7 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 const errors = []; page.on("pageerror", (e) => errors.push(e.message));
 await page.goto(url);
-await page.waitForFunction(() => document.querySelectorAll("#bits-out .chip, #bits-watch .chip").length > 0);
+await page.waitForFunction(() => document.querySelectorAll("#groups .chip.b-out, #groups .chip.b-watch").length > 0);
 await page.waitForTimeout(6000);
 const r = await page.evaluate(async () => {
   const t = (fn, n) => { const t0 = performance.now(); for (let i = 0; i < n; i++) fn(); return (performance.now() - t0) / n; };

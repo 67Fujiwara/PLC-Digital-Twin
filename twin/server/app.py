@@ -13,6 +13,7 @@ import time
 from collections import deque
 
 from ..config import TwinConfig, parse_config, save_watch, tags_sidecar_path
+from ..groups import load_groups, save_groups
 from ..core.loop import run_loop
 from .http import WebServer, WSClient, Request
 
@@ -35,6 +36,8 @@ class TwinApp:
         self.server.route("GET", "/api/stat")(self._api_stat)
         self.server.route("POST", "/api/cmd")(self._api_cmd)
         self.server.route("POST", "/api/import")(self._api_import)
+        self.server.route("GET", "/api/groups")(self._api_groups_get)
+        self.server.route("PUT", "/api/groups")(self._api_groups_put)
         self.server.route("POST", "/api/scan")(self._api_scan_start)
         self.server.route("GET", "/api/scan")(self._api_scan_get)
         self.scan_status: dict = {"busy": False, "has_prev": False}
@@ -112,7 +115,7 @@ class TwinApp:
         print(f"[info] ブラウザ接続 {client.peer}", flush=True)
         from .. import __version__
         hello = {"type": "hello", "config": self.cfg.to_public(), "server_time": time.time(),
-                 "build": self.app_build(), "version": __version__}
+                 "build": self.app_build(), "version": __version__, "groups": self._groups()}
         await client.send_text(json.dumps(hello, ensure_ascii=False))
         # 接続直後に履歴 (波形用) をまとめて送る (監視ワードが多いときはサイズで打ち切り: 約 2MB まで)
         per_sample = 6 * (self.cfg.out.words + self.cfg.inp.words + self.cfg.watch_words) + 60
@@ -182,7 +185,7 @@ class TwinApp:
             if getattr(self, "_hello_dirty", False):
                 self._hello_dirty = False
                 await self.server.broadcast(json.dumps({"type": "hello", "config": self.cfg.to_public(),
-                                                        "server_time": time.time()}, ensure_ascii=False))
+                                                        "server_time": time.time(), "groups": self._groups()}, ensure_ascii=False))
             if new:
                 last_seq = new[-1]["seq"]
             if logs:
@@ -234,6 +237,25 @@ class TwinApp:
         self.send_cmd(req.json())
         return 200, "application/json", b'{"ok":true}'
 
+    def _groups(self) -> list:
+        try:
+            return load_groups(self.config_path, self.cfg)
+        except Exception as e:  # noqa: BLE001
+            print(f"[error] groups: {e}", flush=True)
+            return []
+
+    async def _api_groups_get(self, req: Request):
+        return 200, "application/json; charset=utf-8", json.dumps({"groups": self._groups()}, ensure_ascii=False).encode()
+
+    async def _api_groups_put(self, req: Request):
+        if not self.config_path:
+            return 400, "application/json; charset=utf-8", json.dumps({"error": "設定パスなし"}, ensure_ascii=False).encode()
+        body = req.json() or {}
+        p = save_groups(self.config_path, body.get("groups") or [])
+        groups = self._groups()
+        await self.server.broadcast(json.dumps({"type": "groups", "groups": groups}, ensure_ascii=False))
+        return 200, "application/json; charset=utf-8", json.dumps({"ok": True, "saved": p, "groups": groups}, ensure_ascii=False).encode()
+
     async def _api_scan_start(self, req: Request):
         mode = "diff" if req.query.get("mode") == "diff" else "full"
         with self.lock:
@@ -266,7 +288,7 @@ class TwinApp:
         if text is None:
             return 400, "application/json", json.dumps({"error": "文字コードを判別できません"}).encode()
         include_system = req.query.get("system") == "1"
-        replace = req.query.get("replace") == "1"
+        replace = req.query.get("replace", "1") != "0"      # 既定: その CSV にあるデバイスだけに置き換える
         ts = tags_sidecar_path(self.config_path) if self.config_path else None
         old: dict = {}
         if ts and os.path.isfile(ts):
@@ -303,7 +325,8 @@ class TwinApp:
         with self.lock:
             self.logs.append({"t": time.time(), "level": "info", "msg": msg})
         print(f"[info] {msg}", flush=True)
-        hello = json.dumps({"type": "hello", "config": self.cfg.to_public(), "server_time": time.time()}, ensure_ascii=False)
+        hello = json.dumps({"type": "hello", "config": self.cfg.to_public(), "server_time": time.time(),
+                            "groups": self._groups()}, ensure_ascii=False)
         await self.server.broadcast(hello)
         return 200, "application/json; charset=utf-8", json.dumps(
             {"ok": True, "out": len(res.tags["out"]), "in": len(res.tags["in"]), "watch": len(res.watch),
