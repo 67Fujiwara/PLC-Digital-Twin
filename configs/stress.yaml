@@ -1,0 +1,35 @@
+# 負荷試験: 実機のように多数のデバイスが毎スキャン変わる状態をモックで再現
+#   python -m twin configs/stress.yaml --cycle 1
+title: Stress (mock)
+plc:
+  type: keyence
+  driver: mock
+  logic: twin.drivers.noisy_logic
+  out: {dev: DM, addr: 1000, words: 64}
+  in:  {dev: DM, addr: 1100, words: 64}
+cycle_ms: 1
+record_seconds: 120
+watch:
+  - {dev: MR, addr: 0, words: 10}
+  - {dev: DM, addr: 0, words: 64}
+  - {dev: DM, addr: 2000, words: 64}
+  - {dev: DM, addr: 3000, words: 64}
+  - {dev: DM, addr: 17694, words: 63}
+  - {dev: DM, addr: 17900, words: 63}
+tags:
+  out:
+    - {name: B0, bit: "0.0"}
+    - {name: B1, bit: "0.1"}
+    - {name: B2, bit: "0.2"}
+    - {name: B3, bit: "0.3"}
+    - {name: B4, bit: "1.0"}
+    - {name: B5, bit: "1.1"}
+    - {name: W10, word: 10}
+    - {name: W11, word: 11}
+    - {name: W12, word: 12, type: s32}
+  in:
+    - {name: BLINK, bit: "0.0"}
+    - {name: CNT, word: 1}
+objects:
+  - {name: blink, type: blinker, output: in.BLINK, period: 0.1}
+  - {name: cnt, type: counter, output: in.CNT}

@@ -148,3 +148,6 @@ label { color: var(--dim); font-size: 11px; cursor: pointer; }
 #scan-list .bit.on { background: #1f4d2a; color: var(--on); } #scan-list .bit.chg { outline: 1px solid var(--chg); }
 #scan-list .nm { color: #9fd0ff; font-family: system-ui, sans-serif; }
 #scan-filter { width: 160px; padding: 1px 5px; font-size: 11px; }
+body.light .chip.chg { animation: none; }
+body.light table.words td.sp canvas { opacity: .3; }
+.ev .sup { color: var(--dim); }

@@ -18,7 +18,9 @@ const r = await page.evaluate(async () => {
   const t0 = performance.now(); let frames = 0;
   await new Promise((res) => { const f = () => { frames++; if (performance.now() - t0 < 5000) requestAnimationFrame(f); else res(); }; requestAnimationFrame(f); });
   po.disconnect();
-  return { updateDevices_ms: upd.toFixed(2), drawWave_ms: wave.toFixed(2), drawLine_ms: line.toFixed(2),
+  const mem = performance.memory ? (performance.memory.usedJSHeapSize / 1048576).toFixed(0) + "MB" : "?";
+  return { updateDevices_ms: upd.toFixed(2), drawWave_ms: wave.toFixed(2), drawLine_ms: line.toFixed(2), heap: mem,
+           events: state.events.length, evdom: document.querySelectorAll("#events .ev").length,
            samples: state.samples.length, cycle_ms: state.cfg.cycle_ms, tags: state.tags.length, wave_ch: state.wave.length,
            longtasks_5s: long, longtask_ms: busy.toFixed(0), raf_fps: (frames / 5).toFixed(0), ws_fps: document.getElementById("s-fps").textContent.trim() };
 });

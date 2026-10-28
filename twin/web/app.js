@@ -20,7 +20,7 @@ const state = {
   wsFps: 0, wsCount: 0, latency: 0,
   changedAt: new Map(), // key -> 最終変化時刻
   cursorX: null,
-  dirty: true,
+  dirty: true, light: false, lightManual: false,
   hidden: new Set(),    // 非表示タグ (tag key)
   watchEntries: [],     // 監視デバイス一覧 (編集用)
 };
@@ -80,6 +80,7 @@ function onMessage(m) {
   if (m.type === "pong") { state.latency = performance.now() - m.t; return; }
   if (m.type === "history") { for (const s of m.samples) pushSample(s, false); state.prev = state.latest; state.dirty = true; return; }
   if (m.type !== "frame") return;
+  const t0 = performance.now();
   state.wsCount++;
   for (const s of m.samples) pushSample(s, true);
   state.sim = m.sim; state.stat = m.stat; state.forces = m.forces;
@@ -89,13 +90,16 @@ function onMessage(m) {
     $("h-wave-res").textContent = `${m.stat.cycle_ms}ms 分解能`;
   }
   for (const l of m.logs || []) addLog(l);
+  flushEvents();
   updateHeader(m);
   updateDevices();
   state.dirty = true;
+  perfTrack(t0);
 }
 
 function pushSample(s, detect) {
-  if (!s.watch) s.watch = state.latest ? state.latest.watch : [];   // 省略 = 前回と同じ
+  s.out = Uint16Array.from(s.out); s.in = Uint16Array.from(s.in);          // メモリ 1/4〜1/8
+  s.watch = s.watch ? Uint16Array.from(s.watch) : (state.latest ? state.latest.watch : new Uint16Array(0));
   state.samples.push(s);
   if (state.samples.length > state.maxSamples) state.samples.splice(0, state.samples.length - state.maxSamples);
   if (detect && state.latest) detectEvents(state.latest, s);
@@ -504,7 +508,7 @@ function updateDevices() {
       // クラス文字列を組み立てて、変わったときだけ DOM に触る
       const cls = "chip" + (on ? " on" : "") + (f ? (forcedBitVal.get(fk) ? " forced fon" : " forced foff") : "") + (waveSet.has(key) ? " sel" : "");
       if (c._cls !== cls) {
-        const flash = c._cls !== undefined && (c._on !== on);
+        const flash = !state.light && c._cls !== undefined && (c._on !== on);
         c.className = cls + (flash ? " chg" : "");
         c._cls = cls; c._on = on;
       }
@@ -540,7 +544,7 @@ function updateDevices() {
 // スパークラインは画面に見えている行だけ 3Hz で描く (毎フレーム全行描くと重い)
 const sparkObserver = new IntersectionObserver((entries) => { for (const e of entries) if (e.target._row) e.target._row.visible = e.isIntersecting; });
 setInterval(() => {
-  if (!state.latest) return;
+  if (!state.latest || state.light) return;
   for (const t of state.tags) {
     if (t.kind === "bit") continue;
     const r = dom.rows.get(tagKey(t));
@@ -619,24 +623,46 @@ function detectEvents(a, b) {
   }
 }
 const evBox = () => $("events");
+const evQueue = [];                 // 未描画イベント
+let evScrolledUp = false;           // 利用者が上へスクロールしている間は自動スクロールしない
+const EV_CHATTER = 20;              // 1 秒にこれ以上変化するタグは抑制 (ログが埋まる・重い)
 function addEvent(e) {
+  const t = e.tag, sec = Math.floor(e.t);
+  if (t._evSec !== sec) { t._evSec = sec; t._evCnt = 0; if (t._sup) { t._sup = false; } }
+  t._evCnt++;
+  if (t._evCnt > EV_CHATTER) {
+    if (!t._sup) { t._sup = true; e = {t: e.t, seq: e.seq, kind: "sup", tag: t, text: `${EV_CHATTER} 回/秒 超 → この秒は省略`}; }
+    else return;
+  }
   state.events.push(e);
   if (state.events.length > 500) state.events.shift();
+  evQueue.push(e);
+}
+function flushEvents() {
+  if (!evQueue.length) return;
   const f = $("ev-filter").value.trim().toLowerCase();
-  if (f && !e.tag.name.toLowerCase().includes(f) && !e.tag.address.toLowerCase().includes(f)) return;
   const box = evBox();
-  const d = el("div", "ev");
-  d.appendChild(el("span", "t", fmtTime(e.t)));
-  d.appendChild(el("span", e.kind, e.kind === "up" ? "▲" : e.kind === "dn" ? "▽" : "≈"));
-  d.appendChild(el("span", "n", e.tag.name));
-  d.appendChild(el("span", "b", `${e.tag.block} ${e.tag.address}`));
-  d.appendChild(el("span", e.kind, e.text));
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
-  box.appendChild(d);
-  while (box.children.length > 500) box.removeChild(box.firstChild);
-  if (atBottom) box.scrollTop = box.scrollHeight;
+  const frag = document.createDocumentFragment();
+  let n = 0;
+  for (const e of evQueue) {
+    if (f && !e.tag.name.toLowerCase().includes(f) && !e.tag.address.toLowerCase().includes(f)) continue;
+    const d = el("div", "ev");
+    d.appendChild(el("span", "t", fmtTime(e.t)));
+    d.appendChild(el("span", e.kind, e.kind === "up" ? "▲" : e.kind === "dn" ? "▽" : e.kind === "sup" ? "…" : "≈"));
+    d.appendChild(el("span", "n", e.tag.name));
+    d.appendChild(el("span", "b", `${e.tag.block} ${e.tag.address}`));
+    d.appendChild(el("span", e.kind, e.text));
+    frag.appendChild(d); n++;
+  }
+  evQueue.length = 0;
+  if (!n) return;
+  box.appendChild(frag);
+  const extra = box.children.length - 500;
+  for (let i = 0; i < extra; i++) box.removeChild(box.firstChild);
+  if (!evScrolledUp) box.scrollTop = 1e9;
   $("h-ev").textContent = `${state.events.length}`;
 }
+evBox().addEventListener("scroll", () => { const b = evBox(); evScrolledUp = b.scrollTop + b.clientHeight < b.scrollHeight - 8; });
 function addLog(l) {
   const box = $("logs");
   const d = el("div", "lg " + (l.level || "info"), `${fmtTime(l.t)}  ${l.msg}`);
@@ -667,7 +693,7 @@ function toggleWave(key) {
 
 const waveCv = $("wave"), lineCv = $("line");
 function resizeCanvas(cv, h) {
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = state.light ? 1 : Math.min(window.devicePixelRatio || 1, 1.5);
   const w = cv.clientWidth || cv.parentElement.clientWidth;
   if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
     cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + "px";
@@ -969,9 +995,25 @@ function drawLine() {
 // ---------------------------------------------------------------------------
 // 描画ループ
 // ---------------------------------------------------------------------------
-let lastDraw = 0;
+let lastDraw = 0, procEma = 0;
+function perfTrack(t0) {
+  const d = performance.now() - t0;
+  procEma = procEma * 0.9 + d * 0.1;
+  if (!state.lightManual) {
+    if (!state.light && procEma > 20) setLight(true, true);
+    else if (state.light && procEma < 6) setLight(false, true);
+  }
+}
+function setLight(on, auto) {
+  state.light = on;
+  if (!auto) state.lightManual = true;
+  $("b-light").classList.toggle("active", on);
+  $("b-light").textContent = on ? (auto ? "軽量 (自動)" : "軽量 ON") : "軽量";
+  document.body.classList.toggle("light", on);
+}
 function raf(ts) {
-  if (state.dirty && ts - lastDraw >= 30) {
+  const minGap = state.light ? 200 : 66;          // 軽量: 5fps, 通常: 15fps (波形は 15fps で十分)
+  if (state.dirty && ts - lastDraw >= minGap) {
     state.dirty = false; lastDraw = ts;
     try { drawWave(); drawLine(); } catch (e) { console.error(e); }
   }
@@ -982,14 +1024,15 @@ function raf(ts) {
 // ボタン
 // ---------------------------------------------------------------------------
 $("b-pause").onclick = togglePause;
+$("b-light").onclick = () => setLight(!state.light, false);
 $("sel-win").onchange = (e) => { state.winSec = parseFloat(e.target.value); state.dirty = true; };
 $("b-release").onclick = () => send({type: "release_all"});
 $("b-simreset").onclick = () => send({type: "sim_reset"});
 $("b-simtoggle").onclick = () => send({type: "sim_enable", value: !(state.stat && state.stat.sim_enabled)});
 $("b-wave-clear").onclick = () => { state.wave = []; saveWave(); updateDevices(); };
-$("b-ev-clear").onclick = () => { state.events = []; evBox().innerHTML = ""; $("h-ev").textContent = "0"; };
+$("b-ev-clear").onclick = () => { state.events = []; evQueue.length = 0; evBox().innerHTML = ""; $("h-ev").textContent = "0"; };
 $("ev-words").onchange = (e) => { state.evWords = e.target.checked; };
-$("ev-filter").oninput = () => { const evs = state.events.slice(); state.events = []; evBox().innerHTML = ""; for (const e of evs) addEvent(e); };
+$("ev-filter").oninput = () => { evBox().innerHTML = ""; evQueue.length = 0; evQueue.push(...state.events); flushEvents(); };
 $("h-raw").onclick = () => { const r = $("raw"); r.classList.toggle("hidden"); $("h-raw").textContent = (r.classList.contains("hidden") ? "▸" : "▾") + " 生データ (全ワード hex)"; };
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
