@@ -31,6 +31,12 @@ class Driver:
     def write_words(self, dev: str, addr: int, values: list[int]) -> None:
         raise NotImplementedError
 
+    def write_bit(self, dev: str, word_addr: int, bit: int, value: bool) -> None:
+        """ワードデバイスの 1 ビット、またはビットデバイスの 1 点を書く。既定は読み→変更→書き (RMW)。"""
+        cur = self.read_words(dev, word_addr, 1)[0]
+        nv = (cur | (1 << bit)) if value else (cur & ~(1 << bit) & 0xFFFF)
+        self.write_words(dev, word_addr, [nv])
+
     @property
     def connected(self) -> bool:
         return True

@@ -19,15 +19,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true", help="設定の検証のみ")
     ap.add_argument("--mock", action="store_true", help="PLC に接続せずモックで起動 (画面と設定の確認用)")
     ap.add_argument("--cycle", help="周期 ms を上書き (数値 or auto=起動時に実測して最速にする)")
+    ap.add_argument("--parallel", action="store_true", help="読みと書きを別接続で同時に行う (plc.parallel_rw: true)")
+    ap.add_argument("--udp", action="store_true", help="UDP で通信 (plc.protocol: udp。KV はポート 8500)")
+    ap.add_argument("--ip", help="PLC の IP を上書き (YAML を編集せずに済む)")
+    ap.add_argument("--words", type=int, help="out/in ブロックのワード数を上書き (例 16)")
     args = ap.parse_args(argv)
 
     from .config import load_config
     try:
         cfg = load_config(args.config)
-        if args.cycle:
-            cfg.raw["cycle_ms"] = args.cycle if args.cycle.lower() == "auto" else float(args.cycle)
+        if args.cycle or args.parallel or args.udp or args.ip or args.words:
             from .config import parse_config
-            cfg = parse_config(cfg.raw)
+            raw = cfg.raw
+            raw["plc"] = dict(raw.get("plc") or {})
+            if args.cycle:
+                raw["cycle_ms"] = args.cycle if args.cycle.lower() == "auto" else float(args.cycle)
+            if args.parallel:
+                raw["plc"]["parallel_rw"] = True
+            if args.udp:
+                raw["plc"]["protocol"] = "udp"
+                if cfg.plc_type == "keyence" and int(raw["plc"].get("port", 8501)) == 8501:
+                    raw["plc"]["port"] = 8500
+            if args.ip:
+                raw["plc"]["ip"] = args.ip
+            if args.words:
+                for k in ("out", "in"):
+                    b = raw["plc"].get(k)
+                    raw["plc"][k] = dict(b) if isinstance(b, dict) else {}
+                    raw["plc"][k]["words"] = int(args.words)
+            cfg = parse_config(raw)
         if args.mock and cfg.plc_type != "mock":
             from .config import parse_config
             raw = dict(cfg.raw)

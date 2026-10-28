@@ -102,3 +102,6 @@ class MockPLC(Driver):
         if not self._connected:
             raise DriverError("mock: 未接続")
         self.mem.set_words(dev, addr, values)
+
+    def write_bit(self, dev: str, word_addr: int, bit: int, value: bool) -> None:
+        self.mem.set_bit(dev, word_addr, bit, value)

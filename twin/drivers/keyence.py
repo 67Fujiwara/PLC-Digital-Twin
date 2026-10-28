@@ -56,6 +56,18 @@ class KeyenceHostLink(NetDriver):
         vals = " ".join(str(v & 0xFFFF) for v in values)
         return f"WRS {cls.device_str(dev, addr)}.U {len(values)} {vals}\r".encode("ascii")
 
+    @classmethod
+    def build_set_reset(cls, dev: str, word_addr: int, bit: int, value: bool) -> bytes:
+        """リレー 1 点の ST (セット) / RS (リセット)。ワードデバイスは bit 指定なしの ST/RS が無いので呼ばない。"""
+        dev = dev.upper()
+        if dev == "B":
+            no = f"{word_addr + bit:X}"                  # B はビット番号 (16 の倍数) 基準 (B20 = 0x20)
+        elif dev in CH_DEVICES:
+            no = f"{word_addr // 100}{bit:02d}"       # ch*100 + bit  (例 MR1 05 → MR105, ch0 → MR005)
+        else:
+            raise DriverError(f"keyence: {dev} は ST/RS 対象外")
+        return f"{'ST' if value else 'RS'} {dev}{no}\r".encode("ascii")
+
     @staticmethod
     def parse_read(resp: bytes, n: int, cmd: str = "") -> list[int]:
         text = resp.decode("ascii", errors="replace").strip()
@@ -85,3 +97,12 @@ class KeyenceHostLink(NetDriver):
         frame = self.build_write(dev, addr, values)
         self._send(frame)
         self.parse_write(self._recv_until(b"\r\n"), frame.decode("ascii").strip())
+
+    def write_bit(self, dev: str, word_addr: int, bit: int, value: bool) -> None:
+        dev = dev.upper()
+        if dev in CH_DEVICES or dev == "B":           # リレーは 1 点だけ ST/RS (他ビットを潰さない)
+            frame = self.build_set_reset(dev, word_addr, bit, value)
+            self._send(frame)
+            self.parse_write(self._recv_until(b"\r\n"), frame.decode("ascii").strip())
+        else:                                          # DM などワードのビットは RMW
+            super().write_bit(dev, word_addr, bit, value)

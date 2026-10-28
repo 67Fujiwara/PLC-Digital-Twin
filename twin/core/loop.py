@@ -38,6 +38,8 @@ class LoopState:
         self.force_bits: dict[tuple[str, int, int], int] = {}   # (block, word, bit) -> 0/1
         self.force_words: dict[tuple[str, int, str], int] = {}  # (block, word, dtype) -> value
         self.pending_writes: list[tuple[str, int, list[int]]] = []  # (dev, addr, values) 直接書込み
+        self.pending_bits: list[tuple[str, int, int, bool, int]] = []  # (dev, word_addr, bit, value, watch_idx)
+        self.verify: list[tuple[int, int, int, str, float]] = []      # (watch_idx, bit, expected, label, deadline)
         self.sim_enabled = True
         self.world = World(cfg)
         self.io = IOBus(self.out, self.inp_sim, self.watch)   # sim は inp_sim に書く
@@ -90,9 +92,8 @@ class LoopState:
             idx, bit, v = int(cmd["word"]), int(cmd["bit"]), 1 if cmd.get("value") else 0
             for w in self.cfg.watch:
                 if w.offset <= idx < w.offset + w.words:
-                    cur = self.watch[idx]
-                    nv = (cur | (1 << bit)) if v else (cur & ~(1 << bit) & 0xFFFF)
-                    self.pending_writes.append((w.dev, self._watch_addr(w, idx - w.offset), [nv]))
+                    # 1 ビットだけ書く (ST/RS / ビット書込み)。書込み後に実際に変わったか確認する
+                    self.pending_bits.append((w.dev, self._watch_addr(w, idx - w.offset), bit, bool(v), idx))
                     break
         elif t == "sim_reset":
             self.world.reset()
@@ -149,10 +150,10 @@ class LoopState:
 
     def _watch_addr(self, w, off: int) -> int:
         # キーエンスのリレーは ch 番号が 100 刻み
-        if self.cfg.plc_type == "keyence" and w.bits and w.dev in ("MR", "R", "LR", "CR", "VB"):
+        if self.cfg.plc_type in ("keyence", "mock") and w.bits and w.dev in ("MR", "R", "LR", "CR", "VB"):
             return w.addr + off * 100
-        if w.bits and self.cfg.plc_type == "melsec":
-            return w.addr + off * 16
+        if w.bits:
+            return w.addr + off * 16                 # B (KV) / M, X, Y (三菱) はビット番号基準
         return w.addr + off
 
     def apply_forces(self) -> None:
@@ -174,13 +175,22 @@ class LoopState:
 
 
 def measure_cycle(drv, cfg: TwinConfig, n: int = 100, parallel: bool = False, wdrv=None) -> dict:
-    """往復時間を実測して最速周期 (ms) を決める。read+write (並列なら max) の p99 に余裕 0.3ms、0.5ms 刻みに切上げ。"""
+    """1 周期ぶんの通信 (読 + 書 + 監視 1 エントリ。並列なら 読 ∥ (書 + 監視)) を実測して最速周期 (ms) を決める。"""
     reads, writes, totals = [], [], []
     zeros = [0] * cfg.inp.words
-    for _ in range(n):
+    watch = [w for w in cfg.watch if not w.error]
+    for i in range(n):
+        wentry = watch[i % len(watch)] if watch and (i % max(1, cfg.watch_every) == 0) else None
         t0 = time.perf_counter()
         if parallel and wdrv is not None:
-            th = threading.Thread(target=wdrv.write_words, args=(cfg.inp.dev, cfg.inp.addr, zeros))
+            def wjob():
+                wdrv.write_words(cfg.inp.dev, cfg.inp.addr, zeros)
+                if wentry is not None:
+                    try:
+                        wdrv.read_words(wentry.dev, wentry.addr, wentry.words)
+                    except ProtocolError:
+                        pass
+            th = threading.Thread(target=wjob)
             th.start()
             drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
             t1 = time.perf_counter()
@@ -189,6 +199,11 @@ def measure_cycle(drv, cfg: TwinConfig, n: int = 100, parallel: bool = False, wd
             reads.append(t1 - t0); writes.append(t2 - t1); totals.append(t2 - t0)
         else:
             drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
+            if wentry is not None:
+                try:
+                    drv.read_words(wentry.dev, wentry.addr, wentry.words)
+                except ProtocolError:
+                    pass
             t1 = time.perf_counter()
             drv.write_words(cfg.inp.dev, cfg.inp.addr, zeros)
             t2 = time.perf_counter()
@@ -225,9 +240,18 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
     write_thread: threading.Thread | None = None
     write_err: list = []
 
-    def do_write(vals: list[int]) -> None:
+    def do_write(vals: list[int], watch_entry=None) -> None:
         try:
             wdrv.write_words(cfg.inp.dev, cfg.inp.addr, vals)
+            if watch_entry is not None:                 # 監視デバイスの読出しは書込み側の接続で (本体の読みと重ねる)
+                w = watch_entry
+                try:
+                    v = wdrv.read_words(w.dev, w.addr, w.words)
+                    st.watch[w.offset:w.offset + w.words] = v
+                except ProtocolError as e:
+                    w.error = str(e)
+                    snap_conn.send({"type": "watch_error", "index": st.cfg.watch.index(w), "msg": str(e)})
+                    snap_conn.send({"type": "log", "level": "error", "msg": f"監視デバイス {w.dev}{w.addr} x{w.words} を無効化: {e}"})
         except DriverError as e:
             write_err.append(e)
 
@@ -297,13 +321,19 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
         # --- 読み (並列 R/W なら前周期の in ブロック書込みを同時に走らせる) ----------
         t0 = time.perf_counter()
         if parallel:
-            write_thread = threading.Thread(target=do_write, args=(list(st.inp),), daemon=True)
+            wentry = None
+            if st.cfg.watch and cycle % st.cfg.watch_every == 0:
+                live = [w for w in st.cfg.watch if not w.error]
+                if live:
+                    wentry = live[st.watch_idx % len(live)]
+                    st.watch_idx += 1
+            write_thread = threading.Thread(target=do_write, args=(list(st.inp), wentry), daemon=True)
             write_thread.start()
         try:
             vals = drv.read_words(cfg.out.dev, cfg.out.addr, cfg.out.words)
             st.out[:] = vals
-            if st.cfg.watch and cycle % st.cfg.watch_every == 0:
-                # 監視デバイスは 1 周期に 1 エントリずつ順番に読む (多数登録しても周期を崩さない)
+            if st.cfg.watch and not parallel and cycle % st.cfg.watch_every == 0:
+                # 監視デバイスは 1 周期に 1 エントリずつ順番に読む (多数登録しても周期を崩さない)。並列時は書込み側で読む
                 live = [i for i, w in enumerate(st.cfg.watch) if not w.error]
                 if live:
                     i = live[st.watch_idx % len(live)]
@@ -312,6 +342,7 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
                     try:
                         v = drv.read_words(w.dev, w.addr, w.words)
                         st.watch[w.offset:w.offset + w.words] = v
+                        _check_verify(st, snap_conn)
                     except ProtocolError as e:
                         # その CPU に無い範囲など: このエントリだけ無効化して続行 (接続は維持)
                         w.error = str(e)
@@ -364,6 +395,15 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
                     snap_conn.send({"type": "log", "msg": f"書込み {dev}{addr} <- {vals}"})
                 except ProtocolError as e:
                     snap_conn.send({"type": "log", "level": "error", "msg": f"書込み失敗 {dev}{addr}: {e}"})
+            while st.pending_bits:
+                dev, waddr, bit, val, idx = st.pending_bits.pop(0)
+                label = _bit_label(st.cfg, idx, bit)
+                try:
+                    drv.write_bit(dev, waddr, bit, val)
+                    snap_conn.send({"type": "log", "msg": f"ビット書込み {label} <- {'ON' if val else 'OFF'}"})
+                    st.verify.append((idx, bit, 1 if val else 0, label, time.perf_counter() + 1.0))
+                except ProtocolError as e:
+                    snap_conn.send({"type": "log", "level": "error", "msg": f"ビット書込み失敗 {label}: {e}"})
         except ProtocolError as e:
             st.status, st.error = "config_error", str(e)
             if cycle % 100 == 0:
@@ -388,6 +428,32 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
     if wdrv is not None:
         wdrv.close()
     snap_conn.send({"type": "log", "msg": "ループ終了"})
+
+
+def _bit_label(cfg: TwinConfig, idx: int, bit: int) -> str:
+    for t in cfg.tags.get("watch", []):
+        if t.ref.kind == "bit" and t.ref.word == idx and t.ref.bit == bit:
+            return f"{t.name} ({t.address})"
+    return f"watch[{idx}].{bit}"
+
+
+def _check_verify(st: LoopState, snap_conn) -> None:
+    """ビット書込み後、次の読出しで値が変わっていなければ知らせる (ラダーの上書き / 入力リフレッシュ)。"""
+    if not st.verify:
+        return
+    now = time.perf_counter()
+    keep = []
+    for idx, bit, exp, label, deadline in st.verify:
+        cur = (st.watch[idx] >> bit) & 1 if idx < len(st.watch) else None
+        if cur == exp:
+            continue                                   # 反映された
+        if now < deadline - 0.7:                       # 読出しがまだ回ってきていない可能性: 少し待つ
+            keep.append((idx, bit, exp, label, deadline))
+        else:
+            snap_conn.send({"type": "log", "level": "error", "msg": (
+                f"{label} は {'ON' if exp else 'OFF'} に書きましたが {'ON' if cur else 'OFF'} のままです: "
+                "ラダー (OUT 命令) か入力リフレッシュが毎スキャン上書きしています。通信で変えられるのはラダーが書いていないデバイスだけです")})
+    st.verify = keep
 
 
 def _snapshot(st: LoopState, now: float, actual_ms: float, read_ms: float, write_ms: float,

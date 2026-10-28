@@ -74,6 +74,15 @@ class MelsecSLMP(NetDriver):
         body = struct.pack("<HH", 0x0401, 0x0000) + self._device(dev, addr) + struct.pack("<H", n)
         return self._header(body)
 
+    def build_write_bit(self, dev: str, bit_addr: int, value: bool) -> bytes:
+        """ビット単位一括書込み (サブコマンド 0x0001) 1 点。データは 1 点 4bit (上位ニブル)。"""
+        dev = dev.upper()
+        if dev not in BIT_DEVICES:
+            raise DriverError(f"melsec: {dev} はビット書込み対象外")
+        body = (struct.pack("<HH", 0x1401, 0x0001) + struct.pack("<I", bit_addr)[:3] + bytes([DEVICE_CODES[dev]])
+                + struct.pack("<H", 1) + bytes([0x10 if value else 0x00]))
+        return self._header(body)
+
     def build_write(self, dev: str, addr: int, values: list[int]) -> bytes:
         if not (1 <= len(values) <= MAX_WORDS):
             raise DriverError(f"melsec: 書込み点数は 1〜{MAX_WORDS}")
@@ -111,6 +120,16 @@ class MelsecSLMP(NetDriver):
             return self.parse_data(self._transact(self.build_read(dev, addr, n)), n)
         except ProtocolError as e:
             raise ProtocolError(f"{e} (読出し {dev}{addr} x{n})") from None
+
+    def write_bit(self, dev: str, word_addr: int, bit: int, value: bool) -> None:
+        dev = dev.upper()
+        if dev in BIT_DEVICES:
+            data = self._transact(self.build_write_bit(dev, word_addr + bit, value))
+            end = struct.unpack("<H", data[:2])[0]
+            if end != 0:
+                raise ProtocolError(f"melsec: ビット書込み終了コード 0x{end:04X} {END_CODES.get(end, '')} ({dev}{word_addr + bit})")
+        else:
+            super().write_bit(dev, word_addr, bit, value)
 
     def write_words(self, dev: str, addr: int, values: list[int]) -> None:
         data = self._transact(self.build_write(dev, addr, values))

@@ -192,3 +192,22 @@ def test_clone_is_separate_connection():
     m = MelsecSLMP("127.0.0.1", 9, network=1, station=2)
     mc = m.clone()
     assert mc is not m and mc.network == 1 and mc.station == 2
+
+
+def test_keyence_set_reset_frames():
+    assert KeyenceHostLink.build_set_reset("MR", 100, 5, True) == b"ST MR105\r"
+    assert KeyenceHostLink.build_set_reset("MR", 0, 0, False) == b"RS MR000\r"
+    assert KeyenceHostLink.build_set_reset("LR", 1500, 15, True) == b"ST LR1515\r"
+    assert KeyenceHostLink.build_set_reset("B", 0x20, 0, True) == b"ST B20\r"   # B: 先頭 B20 (0x20) の bit0
+    assert KeyenceHostLink.build_set_reset("B", 0x20, 15, True) == b"ST B2F\r"
+    with pytest.raises(DriverError):
+        KeyenceHostLink.build_set_reset("DM", 100, 1, True)
+
+
+def test_melsec_bit_write_frame():
+    d = MelsecSLMP("127.0.0.1", 5000)
+    f = d.build_write_bit("M", 101, True)
+    assert f[11:13] == b"\x01\x14" and f[13:15] == b"\x01\x00"     # 0x1401 / sub 0x0001
+    assert f[15:18] == (101).to_bytes(3, "little") and f[18] == 0x90
+    assert f[19:21] == b"\x01\x00" and f[21] == 0x10
+    assert d.build_write_bit("M", 101, False)[21] == 0x00

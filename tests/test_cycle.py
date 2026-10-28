@@ -106,3 +106,75 @@ def test_bad_watch_entry_is_disabled_without_disconnect():
     assert s["stat"]["status"] == "connected"
     assert s["out"] == [7] * 8 and s["watch"][0] == 7 and s["watch"][4] == 7   # 他の監視は読めている
     srv.close()
+
+
+def test_watch_bit_write_uses_set_reset_and_verifies():
+    """監視ビットのトグルは ST/RS 1 点書込み。ラダーに上書きされる場合は確認ログが出る。"""
+    import socket
+    import threading
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(4)
+    port = srv.getsockname()[1]
+    mem = {"MR100": 0, "LR0": 0}
+    cmds = []
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(c,), daemon=True).start()
+
+    def handle(c):
+        buf = b""
+        while True:
+            try:
+                d = c.recv(4096)
+            except OSError:
+                return
+            if not d:
+                return
+            buf += d
+            while b"\r" in buf:
+                line, buf = buf.split(b"\r", 1)
+                p = line.decode().split()
+                cmds.append(line.decode())
+                if p[0] == "RDS":
+                    dev = p[1].split(".")[0]
+                    n = int(p[2])
+                    base = mem.get(dev, 0)
+                    c.sendall((" ".join(str(base if i == 0 else 0) for i in range(n)) + "\r\n").encode())
+                elif p[0] in ("ST", "RS"):
+                    dev = p[1]
+                    if dev.startswith("LR"):            # LR は保持される (TP フラグ想定)
+                        mem["LR0"] = 1 if p[0] == "ST" else 0
+                    # MR105 はラダーが上書きする想定: 変えない
+                    c.sendall(b"OK\r\n")
+                else:
+                    c.sendall(b"OK\r\n")
+
+    threading.Thread(target=serve, daemon=True).start()
+    raw = {"plc": {"type": "keyence", "ip": "127.0.0.1", "port": port, "out": {"dev": "DM", "addr": 1000, "words": 4},
+                   "in": {"dev": "DM", "addr": 1100, "words": 4}},
+           "cycle_ms": 10, "watch_every": 1,
+           "watch": [{"dev": "MR", "addr": 100, "words": 1}, {"dev": "LR", "addr": 0, "words": 1}],
+           "tags": {}, "objects": []}
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue(); pc, cc = ctx.Pipe(duplex=False); ev = ctx.Event()
+    p = ctx.Process(target=run_loop, args=(raw, q, cc, ev)); p.start()
+    time.sleep(1.0)
+    q.put({"type": "write_watch_bit", "word": 0, "bit": 5, "value": 1})      # MR105 (ラダーが上書き)
+    q.put({"type": "write_watch_bit", "word": 1, "bit": 0, "value": 1})      # LR000 (保持される)
+    snaps, logs = [], []
+    t0 = time.time()
+    while time.time() - t0 < 2.5:
+        if pc.poll(0.05):
+            m = pc.recv()
+            (snaps if m["type"] == "snap" else logs).append(m)
+    ev.set(); p.join(3); srv.close()
+    msgs = [l["msg"] for l in logs]
+    assert "ST MR105" in cmds and "ST LR000" in cmds
+    assert not any(c.startswith("WRS MR") for c in cmds)                      # ワードごと書いていない
+    assert any("MR105" in m and "ON のまま" not in m and "OFF のままです" in m for m in msgs), msgs
+    assert not any("LR000" in m and "のままです" in m for m in msgs)
+    assert snaps[-1]["watch"][1] & 1 == 1
