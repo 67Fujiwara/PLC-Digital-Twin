@@ -194,10 +194,14 @@ def measure_cycle(drv, cfg: TwinConfig, n: int = 100, parallel: bool = False, wd
             t2 = time.perf_counter()
             reads.append(t1 - t0); writes.append(t2 - t1); totals.append(t2 - t0)
     totals.sort()
-    p99 = totals[min(len(totals) - 1, int(len(totals) * 0.99))] * 1000
+    q = lambda f: totals[min(len(totals) - 1, int(len(totals) * f))] * 1000  # noqa: E731
+    p50, p90, p99 = q(0.5), q(0.9), q(0.99)
     avg = sum(totals) / len(totals) * 1000
-    cycle = max(0.5, math.ceil((p99 + 0.3) / 0.5) * 0.5)
-    return {"cycle_ms": cycle, "avg_ms": round(avg, 3), "p99_ms": round(p99, 3), "max_ms": round(totals[-1] * 1000, 3),
+    # p90 + 余裕 0.5ms。最悪値 (p99/max) に合わせると、モニタや TP の割込みで一瞬詰まった応答に引っ張られて
+    # 周期が何倍にもなる。たまの超過は次周期で追いつく方が平均周期が短い
+    cycle = max(0.5, math.ceil((p90 + 0.5) / 0.5) * 0.5)
+    return {"cycle_ms": cycle, "avg_ms": round(avg, 3), "p50_ms": round(p50, 3), "p90_ms": round(p90, 3),
+            "p99_ms": round(p99, 3), "max_ms": round(totals[-1] * 1000, 3),
             "read_avg_ms": round(sum(reads) / len(reads) * 1000, 3), "write_avg_ms": round(sum(writes) / len(writes) * 1000, 3)}
 
 
@@ -269,9 +273,16 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
                         cfg.cycle_ms = measured["cycle_ms"]
                         st.cfg.cycle_ms = measured["cycle_ms"]
                         next_t = time.perf_counter()
+                        last_t = next_t
+                        jit = JitterStats(200)          # 計測中の停止をジッタ統計に残さない
                         snap_conn.send({"type": "log", "msg": (
-                            f"周期自動決定: {measured['cycle_ms']}ms  (往復 avg {measured['avg_ms']}ms / p99 {measured['p99_ms']}ms / "
-                            f"max {measured['max_ms']}ms, 読み {measured['read_avg_ms']}ms 書き {measured['write_avg_ms']}ms, 100回実測)")})
+                            f"周期自動決定: {measured['cycle_ms']}ms  (往復 中央値 {measured['p50_ms']}ms / p90 {measured['p90_ms']}ms / "
+                            f"p99 {measured['p99_ms']}ms / max {measured['max_ms']}ms, 読み {measured['read_avg_ms']}ms "
+                            f"書き {measured['write_avg_ms']}ms, 100回実測)")})
+                        if measured["p99_ms"] > measured["p50_ms"] * 2:
+                            snap_conn.send({"type": "log", "msg": (
+                                "応答時間のばらつきが大きい: KV STUDIO のモニタや TP のポーリングが同じポートを使っていると遅くなります。"
+                                "モニタを閉じる、plc.parallel_rw: true、protocol: udp を試してください")})
                 except DriverError as e:
                     st.status, st.error = "disconnected", str(e)
                     drv.close()

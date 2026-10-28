@@ -19,8 +19,9 @@ from .drivers import make_driver, DriverError
 
 
 def stats(xs: list[float]) -> tuple[float, float, float]:
+    """(avg, p90, max) ms"""
     xs = sorted(xs)
-    return (sum(xs) / len(xs) * 1000, xs[min(len(xs) - 1, int(len(xs) * 0.99))] * 1000, xs[-1] * 1000)
+    return (sum(xs) / len(xs) * 1000, xs[min(len(xs) - 1, int(len(xs) * 0.9))] * 1000, xs[-1] * 1000)
 
 
 def bench(plc: dict, out, inp, words: int, n: int) -> dict | None:
@@ -67,8 +68,8 @@ def bench(plc: dict, out, inp, words: int, n: int) -> dict | None:
     return {"read": stats(r), "write": stats(w), "rw": stats(rw), "par": par}
 
 
-def rec(p99_ms: float) -> float:
-    return max(0.5, math.ceil((p99_ms + 0.3) / 0.5) * 0.5)
+def rec(p90_ms: float) -> float:
+    return max(0.5, math.ceil((p90_ms + 0.5) / 0.5) * 0.5)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.plc.get("protocol", "tcp") == "udp" and "udp" not in protos:
         protos = ["udp"]
     print(f"PLC: {cfg.plc_type} {cfg.plc.get('ip', '')}  out={cfg.out.dev}{cfg.out.addr} in={cfg.inp.dev}{cfg.inp.addr}  n={args.n}")
-    print(f"{'proto':5} {'words':>5} | {'読み avg/p99/max':>22} | {'書き avg/p99/max':>22} | {'往復 avg/p99/max':>22} | 推奨周期 | 並列時 往復 p99 → 推奨")
+    print(f"{'proto':5} {'words':>5} | {'読み avg/p90/max':>22} | {'書き avg/p90/max':>22} | {'往復 avg/p90/max':>22} | 推奨周期 | 並列時 往復 p90 → 推奨")
     best = None
     for proto in protos:
         plc = dict(cfg.plc)
