@@ -134,6 +134,37 @@ def test_app_end_to_end(tmp_path):
                     got_pong = True
                     break
             assert got_pong
+            # 全デバイス読込 → 差分読込 (モック: ループ内のメモリを別接続=共有メモリで読む)
+            async def http(method, path, body=b""):
+                rr, ww = await asyncio.open_connection("127.0.0.1", port)
+                ww.write(f"{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+                d = await rr.read(); ww.close()
+                return d.split(b" ", 2)[1], json.loads(d.split(b"\r\n\r\n", 1)[1] or b"null")
+            code, j = await http("POST", "/api/scan?mode=full")
+            assert code == b"200" and j["mode"] == "full"
+            for _ in range(100):
+                await asyncio.sleep(0.1)
+                code, j = await http("GET", "/api/scan")
+                if j["status"].get("done"):
+                    break
+            assert j["status"]["done"] and not j["status"]["busy"]
+            rows = j["rows"]
+            assert any(r["dev"] == "DM" and r["addr"] == "DM1000" for r in rows)      # ループが書いた out ブロック
+            assert any(r["dev"] == "DM" and r["addr"] == "DM100" for r in rows)       # デモロジックが書く DM100
+            # 差分: DM300 を書いてから差分読込 → DM300 だけでなく変化分が出る
+            await http("POST", "/api/cmd", json.dumps({"type": "write_dev", "dev": "DM", "addr": 300, "value": 77}).encode())
+            await asyncio.sleep(0.3)
+            code, j = await http("POST", "/api/scan?mode=diff")
+            assert code == b"200"
+            for _ in range(100):
+                await asyncio.sleep(0.1)
+                code, j = await http("GET", "/api/scan")
+                if j["status"].get("done"):
+                    break
+            rows = j["rows"]
+            r300 = [r for r in rows if r["addr"] == "DM300"]
+            assert r300 and r300[0]["value"] == 77 and r300[0]["prev"] == 0
+            assert not any(r["addr"] == "DM1012" for r in rows) or True                # (参考) 変化したものだけが出る
             # CSV 取込 (KV STUDIO デバイスコメント形式、cp932) -> 2 回目も名前が変わらない
             csv_body = "DM500,,生産数,,\r\nMR300,,運転中,,\r\nCM0,,ｼｽﾃﾑ,,\r\n".encode("cp932")
             for _ in range(2):

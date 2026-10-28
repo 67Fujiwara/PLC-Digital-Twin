@@ -32,6 +32,11 @@ class TwinApp:
         self.server.route("GET", "/api/stat")(self._api_stat)
         self.server.route("POST", "/api/cmd")(self._api_cmd)
         self.server.route("POST", "/api/import")(self._api_import)
+        self.server.route("POST", "/api/scan")(self._api_scan_start)
+        self.server.route("GET", "/api/scan")(self._api_scan_get)
+        self.scan_status: dict = {"busy": False, "has_prev": False}
+        self.scan_rows: list = []
+        self.scan_mode: str = ""
 
         maxlen = int(cfg.record_seconds * 1000 / cfg.cycle_ms) + 10
         self.ring: deque[dict] = deque(maxlen=maxlen)
@@ -76,6 +81,14 @@ class TwinApp:
                         self.ring = deque(self.ring, maxlen=maxlen)
                     self.ring.append(c)
                     self.latest = msg
+            elif msg.get("type") == "scan_progress":
+                with self.lock:
+                    self.scan_status = msg["status"]
+            elif msg.get("type") == "scan_result":
+                with self.lock:
+                    self.scan_status = msg["status"]
+                    self.scan_rows = msg["rows"]
+                    self.scan_mode = msg["mode"]
             elif msg.get("type") == "log":
                 entry = {"t": time.time(), "level": msg.get("level", "info"), "msg": msg.get("msg", "")}
                 with self.lock:
@@ -168,6 +181,7 @@ class TwinApp:
                 "wall": latest["wall"],
                 "logs": logs,
                 "loop_alive": self.proc.is_alive() if self.proc else False,
+                "scan": self.scan_status,
                 "clients": len(self.server.clients),
             }
             self.ws_frames += 1
@@ -185,6 +199,22 @@ class TwinApp:
     async def _api_cmd(self, req: Request):
         self.send_cmd(req.json())
         return 200, "application/json", b'{"ok":true}'
+
+    async def _api_scan_start(self, req: Request):
+        mode = "diff" if req.query.get("mode") == "diff" else "full"
+        with self.lock:
+            if self.scan_status.get("busy"):
+                return 409, "application/json; charset=utf-8", json.dumps({"error": "スキャン実行中"}, ensure_ascii=False).encode()
+            self.scan_status = {"busy": True, "mode": mode, "progress": 0.0, "rows": 0, "errors": [], "done": False,
+                                "has_prev": self.scan_status.get("has_prev", False)}
+        self.send_cmd({"type": "scan", "mode": mode})
+        return 200, "application/json", json.dumps({"ok": True, "mode": mode}).encode()
+
+    async def _api_scan_get(self, req: Request):
+        with self.lock:
+            body = {"status": self.scan_status, "mode": self.scan_mode,
+                    "rows": self.scan_rows if req.query.get("rows", "1") != "0" else []}
+        return 200, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
 
     async def _api_import(self, req: Request):
         """PLC のラベル/デバイスコメント CSV を取り込み、<設定>.tags.yaml に保存して設定を読み直す。"""

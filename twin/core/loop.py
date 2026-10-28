@@ -24,6 +24,7 @@ import traceback
 from ..config import TwinConfig, parse_config, Ref
 from ..drivers import make_driver, DriverError
 from ..sim import World, IOBus
+from ..scanner import Scanner
 from .timing import raise_priority, sleep_until, JitterStats
 
 
@@ -45,6 +46,10 @@ class LoopState:
         self.error = ""
         self.seq = 0
         self.watch_idx = 0
+        self.scanner: Scanner | None = None
+        self.scan_thread: threading.Thread | None = None
+        self.snap_conn = None
+        self.drv = None
 
     # --- コマンド -------------------------------------------------------
     def handle(self, cmd: dict) -> None:
@@ -99,6 +104,8 @@ class LoopState:
                 o.emit(self.world)  # type: ignore[attr-defined]
         elif t == "remove_works":
             self.world.works.clear()
+        elif t == "scan":
+            self.start_scan(str(cmd.get("mode", "full")))
         elif t == "set_watch":
             raw = dict(self.cfg.raw)
             raw["watch"] = list(cmd.get("watch") or [])
@@ -107,6 +114,38 @@ class LoopState:
             self.watch = [0] * cfg.watch_words
             self.io = IOBus(self.out, self.inp_sim, self.watch)
             self.io_plc = IOBus(self.out, self.inp, self.watch)
+
+    def start_scan(self, mode: str) -> None:
+        """全デバイス読込 / 差分読込を別スレッド + 別接続で実行 (周期ループは止めない)。"""
+        if self.scan_thread is not None and self.scan_thread.is_alive():
+            self.snap_conn.send({"type": "log", "level": "error", "msg": "スキャン実行中です"})
+            return
+        if self.scanner is None:
+            def make_conn():
+                d = self.drv.clone()
+                if d is self.drv:
+                    raise DriverError("このドライバはスキャン用の 2 本目の接続を作れません")
+                d.connect()
+                return d
+            self.scanner = Scanner(self.cfg, make_conn)
+        self.scanner.cfg = self.cfg
+        last_sent = [0.0]
+
+        def progress(stt: dict) -> None:
+            now = time.perf_counter()
+            if now - last_sent[0] > 0.2:
+                last_sent[0] = now
+                self.snap_conn.send({"type": "scan_progress", "status": stt})
+
+        def work() -> None:
+            res = self.scanner.run(mode, progress)
+            self.snap_conn.send({"type": "scan_result", "status": self.scanner.status(), "rows": res.rows, "mode": mode})
+            self.snap_conn.send({"type": "log", "msg": f"スキャン完了 ({'差分' if mode == 'diff' else '全'}): "
+                                 f"{res.read_words} ワード, 該当 {len(res.rows)} 件, {round(res.finished - res.started, 2)} 秒"
+                                 + (f", エラー {len(res.errors)} 件" if res.errors else "")})
+
+        self.scan_thread = threading.Thread(target=work, name="scan", daemon=True)
+        self.scan_thread.start()
 
     def _watch_addr(self, w, off: int) -> int:
         # キーエンスのリレーは ch 番号が 100 刻み
@@ -169,6 +208,8 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
     prio_msg = raise_priority()
     period = cfg.cycle_ms / 1000.0
     drv = make_driver(cfg.plc)
+    st.drv = drv
+    st.snap_conn = snap_conn
     parallel = bool(cfg.plc.get("parallel_rw", False))
     wdrv = drv.clone() if parallel else None          # 書込み専用の 2 本目の接続
     if parallel and wdrv is drv:

@@ -132,3 +132,18 @@ canvas#line, canvas#wave { width: 100%; display: block; background: #0c0f13; bor
 .lg.error { color: var(--err); }
 #ev-filter { width: 90px; padding: 1px 5px; font-size: 11px; }
 label { color: var(--dim); font-size: 11px; cursor: pointer; }
+
+/* デバイス読込 */
+.mbox.wide { width: min(1100px, 95vw); }
+#scan-prog { position: relative; height: 18px; background: var(--panel2); border-radius: 4px; margin-bottom: 6px; overflow: hidden; }
+#scan-bar { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2a4a6e; transition: width .2s; }
+#scan-msg { position: relative; font-size: 11px; line-height: 18px; padding-left: 8px; color: var(--fg); }
+#scan-list { overflow: auto; font-family: var(--mono); font-size: 12px; }
+#scan-list table { border-collapse: collapse; width: 100%; }
+#scan-list td, #scan-list th { padding: 2px 6px; border-top: 1px solid var(--line); white-space: nowrap; text-align: left; }
+#scan-list th { color: var(--dim); font-weight: 400; position: sticky; top: 0; background: var(--panel); }
+#scan-list td.v { text-align: right; } #scan-list td.chg { color: var(--chg); }
+#scan-list .bit { display: inline-block; padding: 0 4px; margin: 1px; border-radius: 3px; background: var(--panel2); color: var(--dim); }
+#scan-list .bit.on { background: #1f4d2a; color: var(--on); } #scan-list .bit.chg { outline: 1px solid var(--chg); }
+#scan-list .nm { color: #9fd0ff; font-family: system-ui, sans-serif; }
+#scan-filter { width: 160px; padding: 1px 5px; font-size: 11px; }

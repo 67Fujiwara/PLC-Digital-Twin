@@ -28,7 +28,9 @@
       <option value="2">2s</option><option value="5">5s</option><option value="10" selected>10s</option>
       <option value="30">30s</option><option value="60">60s</option><option value="120">120s</option>
     </select>
-    <button id="b-import" title="PLC のラベル/デバイスコメント CSV (GX Works3 / KV STUDIO) を取り込んでデバイスを追加">CSV 取込</button>
+    <button id="b-scan-full" title="PLC の全デバイスを読み、値が 0 でないデバイスを一覧にする (名前は付かない)">全デバイス読込</button>
+    <button id="b-scan-diff" title="前回の読込から値が変わったデバイスを一覧にする (TP を操作してから押すと、動いたデバイスが分かる)">差分読込</button>
+    <button id="b-import" title="PLC のラベル/デバイスコメント CSV (GX Works3 / KV STUDIO) を取り込んでデバイスに名前を付ける">CSV 取込</button>
     <input type="file" id="f-import" accept=".csv,text/csv" class="hidden">
     <button id="b-visible" title="表示するデバイスを選ぶ">表示設定</button>
     <button id="b-release" title="ブラウザからの強制をすべて解除">強制解除</button>
@@ -104,6 +106,21 @@
     <h3>表示するデバイス <span class="right"><input id="vis-filter" placeholder="絞込み"> <button id="vis-all" class="small">全て</button> <button id="vis-none" class="small">なし</button> <button id="vis-close" class="small">閉じる</button></span></h3>
     <p class="dim">チェックを外したデバイスはパネルに表示されません (記録・波形追加は可能)。設定はこのブラウザに保存されます。</p>
     <div id="vis-list"></div>
+  </div>
+</div>
+<div id="scan-modal" class="hidden">
+  <div class="mbox wide">
+    <h3><span id="scan-title">デバイス読込</span>
+      <span class="right">
+        <input id="scan-filter" placeholder="絞込み (DM2 / MR8 / 名前)">
+        <label><input type="checkbox" id="scan-bits" checked> ビット</label>
+        <label><input type="checkbox" id="scan-words" checked> ワード</label>
+        <button id="scan-add" class="small" title="チェックしたデバイスを監視デバイスに追加">選択を監視に追加</button>
+        <button id="scan-csv" class="small">CSV 保存</button>
+        <button id="scan-close" class="small">閉じる</button>
+      </span></h3>
+    <div id="scan-prog"><div id="scan-bar"></div><span id="scan-msg"></span></div>
+    <div id="scan-list"></div>
   </div>
 </div>
 <script src="app.js"></script>

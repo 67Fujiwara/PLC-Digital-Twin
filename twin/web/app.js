@@ -225,6 +225,131 @@ $("watch-add").onkeydown = (e) => { if (e.key === "Enter") addWatch(); };
 $("b-watch-save").onclick = () => sendWatch(true);
 
 // ---------------------------------------------------------------------------
+// デバイス読込 (全 / 差分): PLC メモリをスキャンして使われているデバイスを見つける
+// ---------------------------------------------------------------------------
+const scan = {rows: [], mode: "", polling: null, checked: new Set()};
+async function startScan(mode) {
+  const r = await fetch(`/api/scan?mode=${mode}`, {method: "POST"});
+  if (!r.ok) { const j = await r.json().catch(() => ({})); alert(j.error || `失敗 ${r.status}`); return; }
+  scan.mode = mode; scan.rows = []; scan.checked.clear();
+  $("scan-title").textContent = mode === "diff" ? "差分読込 (前回から変わったデバイス)" : "全デバイス読込 (値 ≠ 0 のデバイス)";
+  $("scan-modal").classList.remove("hidden");
+  $("scan-list").innerHTML = "";
+  setScanProgress({busy: true, progress: 0});
+  clearInterval(scan.polling);
+  scan.polling = setInterval(pollScan, 400);
+}
+function setScanProgress(st) {
+  const p = Math.round((st.progress || 0) * 100);
+  $("scan-bar").style.width = p + "%";
+  $("scan-msg").textContent = st.busy ? `読込中 ${p}%  ${st.read_words || 0}/${st.total_words || 0} ワード  該当 ${st.rows || 0} 件`
+    : `完了: ${st.read_words || 0} ワード読込, 該当 ${st.rows || 0} 件, ${st.elapsed || 0} 秒` + (st.errors && st.errors.length ? `  (読めない範囲 ${st.errors.length})` : "");
+  if (st.errors && st.errors.length) $("scan-msg").title = st.errors.join("\n");
+}
+async function pollScan() {
+  const r = await fetch("/api/scan?rows=0"); const j = await r.json();
+  setScanProgress(j.status);
+  if (j.status.done || !j.status.busy) {
+    clearInterval(scan.polling); scan.polling = null;
+    const r2 = await fetch("/api/scan"); const j2 = await r2.json();
+    scan.rows = j2.rows || []; scan.mode = j2.mode;
+    renderScan();
+  }
+}
+function renderScan() {
+  const f = $("scan-filter").value.trim().toLowerCase();
+  const showB = $("scan-bits").checked, showW = $("scan-words").checked;
+  const rows = scan.rows.filter(r => (r.bits ? showB : showW)).filter(r => {
+    if (!f) return true;
+    if (r.addr.toLowerCase().includes(f)) return true;
+    if (r.bits) return Object.values(r.labels).some(l => l.toLowerCase().includes(f)) || Object.values(r.names || {}).some(n => n.toLowerCase().includes(f));
+    return (r.name || "").toLowerCase().includes(f);
+  });
+  const diff = scan.mode === "diff";
+  const box = $("scan-list"); box.innerHTML = "";
+  if (!rows.length) { box.textContent = scan.rows.length ? "絞込みに一致なし" : (diff ? "変化したデバイスはありません" : "値が 0 でないデバイスはありません"); return; }
+  const tbl = document.createElement("table");
+  tbl.innerHTML = `<tr><th></th><th>デバイス</th><th>名前</th><th>値</th><th>hex</th>${diff ? "<th>前回</th>" : ""}<th>ビット (ON=緑${diff ? ", 枠=変化" : ""})</th></tr>`;
+  const MAX = 3000;
+  rows.slice(0, MAX).forEach((r, i) => {
+    const tr = document.createElement("tr");
+    const key = `${r.dev}:${r.word}`;
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = scan.checked.has(key);
+    cb.onchange = () => cb.checked ? scan.checked.add(key) : scan.checked.delete(key);
+    const td0 = document.createElement("td"); td0.appendChild(cb); tr.appendChild(td0);
+    tr.appendChild(el("td", null, r.addr));
+    const nm = r.bits ? Object.entries(r.names || {}).map(([b, n]) => `${r.labels[b]}=${n}`).join(" ") : (r.name || "");
+    tr.appendChild(el("td", "nm", nm));
+    const chg = diff && r.prev !== r.value;
+    tr.appendChild(el("td", "v" + (chg ? " chg" : ""), r.value.toLocaleString()));
+    tr.appendChild(el("td", "v", hex(r.value)));
+    if (diff) tr.appendChild(el("td", "v", r.prev == null ? "" : r.prev.toLocaleString()));
+    const tb = el("td");
+    if (r.bits) {
+      for (let b = 15; b >= 0; b--) {
+        const on = r.on.includes(b), c = (r.changed || []).includes(b);
+        if (!on && !c) continue;
+        const sp = el("span", "bit" + (on ? " on" : "") + (c ? " chg" : ""), r.labels[b]);
+        if (r.names && r.names[b]) sp.title = r.names[b];
+        tb.appendChild(sp);
+      }
+    }
+    tr.appendChild(tb);
+    tbl.appendChild(tr);
+  });
+  box.appendChild(tbl);
+  if (rows.length > MAX) box.appendChild(el("div", "dim", `… 他 ${rows.length - MAX} 件 (絞込みで減らしてください)`));
+}
+function scanAddToWatch() {
+  const sel = scan.rows.filter(r => scan.checked.has(`${r.dev}:${r.word}`));
+  if (!sel.length) { alert("追加するデバイスにチェックを入れてください"); return; }
+  // 同じデバイス種別で連続する word をまとめる (隙間 3 まで、64 ワードまで)
+  const by = {};
+  for (const r of sel) (by[r.dev] = by[r.dev] || []).push(r);
+  let added = 0;
+  for (const dev of Object.keys(by)) {
+    const rs = by[dev].sort((a, b) => a.word - b.word);
+    const kc = state.cfg.plc.type === "keyence" || state.cfg.plc.type === "mock";
+    const isCh = kc && ["MR", "R", "LR", "CR", "VB"].includes(dev);
+    const step = rs[0].bits ? (isCh ? 100 : 16) : 1;
+    let g = null;
+    for (const r of rs) {
+      if (g && r.word - g.last <= 3 && r.word - g.first < 64) g.last = r.word;
+      else { if (g) pushGroup(g); g = {first: r.word, last: r.word, bits: r.bits}; }
+    }
+    if (g) pushGroup(g);
+    function pushGroup(g) {
+      const addr = g.first * step;      // 既定範囲は先頭 0 なので word index × step
+      const words = g.last - g.first + 1;
+      if (!state.watchEntries.some(w => w.dev === dev && w.addr === addr && w.words === words)) {
+        state.watchEntries.push({dev, addr, words, bits: g.bits}); added++;
+      }
+    }
+  }
+  sendWatch(false);
+  $("scan-modal").classList.add("hidden");
+  alert(`監視デバイスに ${added} エントリ追加しました。残すときは「監視デバイス」の「保存」を押してください。`);
+}
+function scanToCsv() {
+  const diff = scan.mode === "diff";
+  const lines = [["device", "name", "value", "hex", diff ? "prev" : "", "bits_on"].join(",")];
+  for (const r of scan.rows) {
+    const nm = r.bits ? Object.entries(r.names || {}).map(([b, n]) => `${r.labels[b]}=${n}`).join(" ") : (r.name || "");
+    const bits = r.bits ? r.on.map(b => r.labels[b]).join(" ") : "";
+    lines.push([r.addr, `"${nm}"`, r.value, hex(r.value), diff ? (r.prev ?? "") : "", `"${bits}"`].join(","));
+  }
+  const blob = new Blob(["\ufeff" + lines.join("\r\n")], {type: "text/csv"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `scan_${scan.mode}_${Date.now()}.csv`; a.click();
+}
+$("b-scan-full").onclick = () => startScan("full");
+$("b-scan-diff").onclick = () => startScan("diff");
+$("scan-close").onclick = () => $("scan-modal").classList.add("hidden");
+$("scan-modal").onclick = (e) => { if (e.target.id === "scan-modal") $("scan-modal").classList.add("hidden"); };
+$("scan-filter").oninput = renderScan; $("scan-bits").onchange = renderScan; $("scan-words").onchange = renderScan;
+$("scan-add").onclick = scanAddToWatch;
+$("scan-csv").onclick = scanToCsv;
+
+// ---------------------------------------------------------------------------
 // CSV 取込 (PLC のラベル / デバイスコメント)
 // ---------------------------------------------------------------------------
 $("b-import").onclick = () => $("f-import").click();
@@ -439,6 +564,8 @@ function updateHeader(m) {
   if (now - fpsLast > 1000) { state.wsFps = fpsCount * 1000 / (now - fpsLast); fpsCount = 0; fpsLast = now; $("s-fps").textContent = state.wsFps.toFixed(0).padStart(2, " "); }
   $("b-simtoggle").textContent = st.sim_enabled ? "Sim 停止" : "Sim 再開";
   $("b-simtoggle").classList.toggle("active", st.sim_enabled === false);
+  if (m.scan) { $("b-scan-diff").disabled = !m.scan.has_prev || !!m.scan.busy; $("b-scan-full").disabled = !!m.scan.busy;
+    $("b-scan-diff").title = m.scan.has_prev ? "前回の読込から値が変わったデバイスを一覧にする" : "先に「全デバイス読込」を実行してください"; }
   const nf = state.forces.bits.length + state.forces.words.length;
   $("b-release").textContent = nf ? `強制解除 (${nf})` : "強制解除";
   $("b-release").classList.toggle("active", nf > 0);
