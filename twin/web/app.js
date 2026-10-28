@@ -92,7 +92,17 @@ function pingLoop() {
 }
 
 function onMessage(m) {
-  if (m.type === "hello") { setup(m.config); return; }
+  if (m.type === "hello") {
+    const mine = document.documentElement.dataset.build;
+    if (m.build && mine && mine !== "__BUILD__" && m.build !== mine) {
+      // サーバの画面コードが更新された (git pull 後の再起動など) → 古いページを自動で入れ替える
+      $("status").textContent = "画面コードが更新されたため再読込します…";
+      setTimeout(() => location.reload(), 300);
+      return;
+    }
+    $("ver").textContent = `v${m.version || "?"} (${(m.build || "").slice(0, 7)})`;
+    setup(m.config); return;
+  }
   if (m.type === "error") { addLog({t: Date.now() / 1000, level: "error", msg: m.msg}); alert(m.msg); return; }
   if (m.type === "pong") { state.latency = performance.now() - m.t; return; }
   if (m.type === "history") { for (const s of m.samples) pushSample(s, false); state.prev = state.latest; state.dirty = true; return; }
@@ -106,6 +116,7 @@ function onMessage(m) {
     state.cfg.cycle_ms = m.stat.cycle_ms;
     state.maxSamples = Math.max(3000, Math.round(state.cfg.record_seconds * 1000 / m.stat.cycle_ms));
     $("h-wave-res").textContent = `${m.stat.cycle_ms}ms 分解能`;
+    mipInit();
   }
   for (const l of m.logs || []) addLog(l);
   flushEvents();
@@ -119,6 +130,7 @@ function pushSample(s, detect) {
   s.out = Uint16Array.from(s.out); s.in = Uint16Array.from(s.in);          // メモリ 1/4〜1/8
   s.watch = s.watch ? Uint16Array.from(s.watch) : (state.latest ? state.latest.watch : new Uint16Array(0));
   state.samples.push(s);
+  mipPush(s);
   if (state.samples.length > state.maxSamples) state.samples.splice(0, state.samples.length - state.maxSamples);
   if (detect && state.latest) detectEvents(state.latest, s);
   state.latest = s;
@@ -156,6 +168,7 @@ function setup(cfg) {
   loadWave();
   if (!rehello) { state.samples = []; state.latest = null; state.prev = null; }
   else state.wave = state.wave.filter(k => state.tagByKey.has(k));
+  mipInit();
   $("status").textContent = "";
 }
 
@@ -707,7 +720,8 @@ function loadWave() {
 function saveWave() { try { localStorage.setItem("twin.wave." + state.cfg.title, JSON.stringify(state.wave)); } catch (e) { /* ignore */ } }
 function toggleWave(key) {
   const i = state.wave.indexOf(key);
-  if (i >= 0) state.wave.splice(i, 1); else state.wave.push(key);
+  if (i >= 0) { state.wave.splice(i, 1); mip.ch.delete(key); } else { state.wave.push(key); mipBuild(key); }
+  state.dirty = true;
   saveWave(); updateDevices();
 }
 
@@ -723,6 +737,37 @@ function resizeCanvas(cv, h) {
 }
 
 const DIG_H = 26, ANA_H = 56, LBL_W = 150, AXIS_H = 18;
+// 長い時間幅用の間引きキャッシュ: 10ms 刻みのバケツ (ビット: ON/OFF の有無と最後の値, ワード: min/max)
+// 波形に出しているチャンネルだけ、サンプル到着時に逐次更新する。120 秒 × 1ms でも 1 万バケツで描ける
+const mip = {K: 1, size: 0, ch: new Map()};
+function mipInit() {
+  if (!state.cfg) return;
+  mip.K = Math.max(1, Math.round(10 / state.cfg.cycle_ms));
+  mip.size = Math.ceil(state.maxSamples / mip.K) + 8;
+  mip.ch.clear();
+  for (const k of state.wave) mipBuild(k);
+}
+function mipSlot(key) {
+  let c = mip.ch.get(key);
+  if (!c) { c = {idx: new Int32Array(mip.size).fill(-1), flags: new Uint8Array(mip.size), lo: new Float64Array(mip.size), hi: new Float64Array(mip.size)}; mip.ch.set(key, c); }
+  return c;
+}
+function mipAdd(c, t, s) {
+  const bkt = Math.floor(s.seq / mip.K), slot = bkt % mip.size, v = getVal(s, t);
+  if (c.idx[slot] !== bkt) { c.idx[slot] = bkt; c.flags[slot] = 0; c.lo[slot] = v; c.hi[slot] = v; }
+  if (t.kind === "bit") c.flags[slot] = (c.flags[slot] & 3) | (v ? 1 : 2) | (v ? 4 : 0);
+  else { if (v < c.lo[slot]) c.lo[slot] = v; if (v > c.hi[slot]) c.hi[slot] = v; }
+}
+function mipBuild(key) {
+  const t = state.tagByKey.get(key); if (!t || !mip.size) return;
+  const c = mipSlot(key); c.idx.fill(-1);
+  for (const s of state.samples) mipAdd(c, t, s);
+}
+function mipPush(s) {
+  if (!mip.size) return;
+  for (const k of state.wave) { const t = state.tagByKey.get(k); if (t) mipAdd(mipSlot(k), t, s); }
+}
+
 function drawWave() {
   const chans = state.wave.map(k => state.tagByKey.get(k)).filter(Boolean);
   const hgt = AXIS_H + chans.reduce((a, t) => a + (t.kind === "bit" ? DIG_H : ANA_H), 0) + 6;
@@ -739,16 +784,15 @@ function drawWave() {
   ctx.font = "10px ui-monospace, monospace"; ctx.textBaseline = "top";
   const stepS = state.winSec <= 2 ? 0.2 : state.winSec <= 5 ? 0.5 : state.winSec <= 10 ? 1 : state.winSec <= 30 ? 5 : 10;
   ctx.strokeStyle = "#232a34"; ctx.fillStyle = "#6b7684";
-  for (let s = 0; s <= state.winSec + 1e-9; s += stepS) {
-    const x = x0 + PW - s / cyc * px;
+  for (let sx = 0; sx <= state.winSec + 1e-9; sx += stepS) {
+    const x = x0 + PW - sx / cyc * px;
     ctx.beginPath(); ctx.moveTo(x, AXIS_H - 4); ctx.lineTo(x, H); ctx.stroke();
-    ctx.fillText(`-${s.toFixed(stepS < 1 ? 1 : 0)}s`, x - 10, 2);
+    ctx.fillText(`-${sx.toFixed(stepS < 1 ? 1 : 0)}s`, x - 10, 2);
   }
-  // サンプル範囲
-  let i0 = ss.length - 1;
-  while (i0 > 0 && ss[i0].seq > nowSeq - nSamp) i0--;
-  let i1 = ss.length - 1;
-  while (i1 > 0 && ss[i1].seq > nowSeq) i1--;
+  // サンプル範囲 (二分探索)
+  const i0 = findSeq(nowSeq - nSamp), i1 = Math.min(ss.length - 1, Math.max(0, findSeq(nowSeq + 1) - 1));
+  const mode = nSamp <= PW * 1.5 ? "exact" : (mip.size && nSamp / mip.K > PW ? "mip" : "dense");
+  const npx = Math.ceil(PW) + 1;
   // カーソル
   let curSeq = null;
   if (state.cursorX != null && state.cursorX > x0) curSeq = Math.round(nowSeq - (x0 + PW - state.cursorX) / px);
@@ -757,43 +801,66 @@ function drawWave() {
   for (const t of chans) {
     const dig = t.kind === "bit";
     const rowH = dig ? DIG_H : ANA_H;
-    // ラベル
     ctx.fillStyle = "#121620"; ctx.fillRect(0, y, LBL_W - 2, rowH - 1);
     ctx.fillStyle = t.block === "out" ? "#9fd0ff" : t.block === "in" ? "#b8f0c0" : "#e8d59a";
     ctx.font = "bold 11px system-ui, sans-serif"; ctx.textBaseline = "middle";
     ctx.fillText(t.name, 6, y + (dig ? 8 : 12), LBL_W - 44);
     ctx.font = "9px ui-monospace, monospace"; ctx.fillStyle = "#6b7684";
     ctx.fillText(t.address, 6, y + (dig ? 18 : 24), LBL_W - 44);
-    // 現在値
     const cur = getVal(curSeq != null ? ss[findSeq(curSeq)] : ss[i1], t);
     ctx.font = "bold 11px ui-monospace, monospace"; ctx.textAlign = "right";
     ctx.fillStyle = dig ? (cur ? "#39d353" : "#7c8695") : "#ffd35c";
     ctx.fillText(dig ? (cur ? "ON" : "OFF") : String(cur), LBL_W - 6, y + 12);
     ctx.textAlign = "left";
     if (curSeq != null) tip.push(`${t.name.padEnd(14)} ${dig ? (cur ? "ON" : "OFF") : cur}`);
-    // 波形
     ctx.beginPath(); ctx.strokeStyle = "#1f252e"; ctx.moveTo(x0, y + rowH - 1); ctx.lineTo(W, y + rowH - 1); ctx.stroke();
-    const dense = (i1 - i0 + 1) > PW * 1.5;      // サンプル数 > ピクセル数: ピクセル単位に束ねる
+    const col = t.block === "out" ? "#4da3ff" : t.block === "in" ? "#39d353" : "#e8d59a";
+    const fill = t.block === "out" ? "rgba(77,163,255,.12)" : t.block === "in" ? "rgba(57,211,83,.12)" : "rgba(232,213,154,.12)";
+    const yOn = y + 4, yOff = y + rowH - 5;
     if (dig) {
-      const col = t.block === "out" ? "#4da3ff" : t.block === "in" ? "#39d353" : "#e8d59a";
-      const fill = t.block === "out" ? "rgba(77,163,255,.12)" : t.block === "in" ? "rgba(57,211,83,.12)" : "rgba(232,213,154,.12)";
-      const yOn = y + 4, yOff = y + rowH - 5;
       ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.fillStyle = fill;
-      if (dense) {
-        const npx = Math.ceil(PW) + 1, hasOn = new Uint8Array(npx), hasOff = new Uint8Array(npx), lastV = new Int8Array(npx).fill(-1);
+      if (mode === "exact") {
+        ctx.beginPath();
+        let prev = null;
         for (let i = i0; i <= i1; i++) {
-          const s = ss[i], v = getVal(s, t), p = Math.floor(seqToX(s.seq) - x0);
-          if (p < 0 || p >= npx) continue;
-          if (v) hasOn[p] = 1; else hasOff[p] = 1;
-          lastV[p] = v ? 1 : 0;
+          const sm = ss[i], v = getVal(sm, t), x = seqToX(sm.seq), yy = v ? yOn : yOff;
+          if (prev == null) ctx.moveTo(Math.max(x0, x), yy); else { ctx.lineTo(x, prev ? yOn : yOff); ctx.lineTo(x, yy); }
+          prev = v;
+        }
+        if (prev != null) ctx.lineTo(seqToX(nowSeq), prev ? yOn : yOff);
+        ctx.stroke();
+        let onStart = null;
+        for (let i = i0; i <= i1; i++) {
+          const sm = ss[i], v = getVal(sm, t);
+          if (v && onStart == null) onStart = seqToX(sm.seq);
+          if (!v && onStart != null) { ctx.fillRect(Math.max(x0, onStart), yOn, seqToX(sm.seq) - Math.max(x0, onStart), rowH - 9); onStart = null; }
+        }
+        if (onStart != null) ctx.fillRect(Math.max(x0, onStart), yOn, seqToX(nowSeq) - Math.max(x0, onStart), rowH - 9);
+      } else {
+        // ピクセル単位に集約 (サンプル or バケツから)
+        const hasOn = new Uint8Array(npx), hasOff = new Uint8Array(npx), lastV = new Int8Array(npx).fill(-1);
+        if (mode === "mip") {
+          const c = mip.ch.get(tagKey(t)) || (mipBuild(tagKey(t)), mip.ch.get(tagKey(t)));
+          const b0 = Math.floor((nowSeq - nSamp) / mip.K), b1 = Math.floor(nowSeq / mip.K);
+          for (let bk = b0; bk <= b1; bk++) {
+            const slot = bk % mip.size; if (c.idx[slot] !== bk) continue;
+            const p = Math.floor(seqToX(bk * mip.K + mip.K / 2) - x0); if (p < 0 || p >= npx) continue;
+            const f = c.flags[slot];
+            if (f & 1) hasOn[p] = 1; if (f & 2) hasOff[p] = 1; lastV[p] = (f & 4) ? 1 : 0;
+          }
+        } else {
+          for (let i = i0; i <= i1; i++) {
+            const sm = ss[i], v = getVal(sm, t), p = Math.floor(seqToX(sm.seq) - x0);
+            if (p < 0 || p >= npx) continue;
+            if (v) hasOn[p] = 1; else hasOff[p] = 1; lastV[p] = v ? 1 : 0;
+          }
         }
         ctx.beginPath();
         let prev = -1, onStart = -1;
         for (let p = 0; p < npx; p++) {
           if (lastV[p] < 0) continue;
-          const x = x0 + p;
+          const x = x0 + p, lv = lastV[p];
           if (hasOn[p] && hasOff[p]) { ctx.moveTo(x, yOn); ctx.lineTo(x, yOff); }
-          const lv = lastV[p];
           if (prev >= 0 && prev !== lv) { ctx.moveTo(x, prev ? yOn : yOff); ctx.lineTo(x, lv ? yOn : yOff); }
           ctx.moveTo(x, lv ? yOn : yOff); ctx.lineTo(x + 1, lv ? yOn : yOff);
           if (hasOn[p] && onStart < 0) onStart = x;
@@ -802,56 +869,43 @@ function drawWave() {
         }
         if (onStart >= 0) ctx.fillRect(onStart, yOn, seqToX(nowSeq) - onStart, rowH - 9);
         ctx.stroke();
-      } else {
-        ctx.beginPath();
-        let prev = null;
-        for (let i = i0; i <= i1; i++) {
-          const s = ss[i], v = getVal(s, t), x = seqToX(s.seq), yy = v ? yOn : yOff;
-          if (prev == null) ctx.moveTo(Math.max(x0, x), yy);
-          else { ctx.lineTo(x, prev ? yOn : yOff); ctx.lineTo(x, yy); }
-          prev = v;
-        }
-        if (prev != null) ctx.lineTo(seqToX(nowSeq), prev ? yOn : yOff);
-        ctx.stroke();
-        let onStart = null;
-        for (let i = i0; i <= i1; i++) {
-          const s = ss[i], v = getVal(s, t);
-          if (v && onStart == null) onStart = seqToX(s.seq);
-          if (!v && onStart != null) { ctx.fillRect(Math.max(x0, onStart), yOn, seqToX(s.seq) - Math.max(x0, onStart), rowH - 9); onStart = null; }
-        }
-        if (onStart != null) ctx.fillRect(Math.max(x0, onStart), yOn, seqToX(nowSeq) - Math.max(x0, onStart), rowH - 9);
       }
     } else {
       let mn = Infinity, mx = -Infinity;
-      for (let i = i0; i <= i1; i++) { const v = getVal(ss[i], t); if (v < mn) mn = v; if (v > mx) mx = v; }
+      const lo = new Float64Array(npx).fill(Infinity), hi = new Float64Array(npx).fill(-Infinity);
+      if (mode === "mip") {
+        const c = mip.ch.get(tagKey(t)) || (mipBuild(tagKey(t)), mip.ch.get(tagKey(t)));
+        const b0 = Math.floor((nowSeq - nSamp) / mip.K), b1 = Math.floor(nowSeq / mip.K);
+        for (let bk = b0; bk <= b1; bk++) {
+          const slot = bk % mip.size; if (c.idx[slot] !== bk) continue;
+          const p = Math.floor(seqToX(bk * mip.K + mip.K / 2) - x0); if (p < 0 || p >= npx) continue;
+          if (c.lo[slot] < lo[p]) lo[p] = c.lo[slot]; if (c.hi[slot] > hi[p]) hi[p] = c.hi[slot];
+        }
+      } else {
+        for (let i = i0; i <= i1; i++) { const sm = ss[i], v = getVal(sm, t), p = Math.floor(seqToX(sm.seq) - x0); if (p < 0 || p >= npx) continue; if (v < lo[p]) lo[p] = v; if (v > hi[p]) hi[p] = v; }
+      }
+      for (let p = 0; p < npx; p++) { if (lo[p] === Infinity) continue; if (lo[p] < mn) mn = lo[p]; if (hi[p] > mx) mx = hi[p]; }
       if (mn === Infinity) { mn = 0; mx = 1; } if (mx === mn) { mx = mn + 1; }
       const yOf = (v) => y + rowH - 6 - (v - mn) / (mx - mn) * (rowH - 14);
       ctx.fillStyle = "#55606f"; ctx.font = "9px ui-monospace, monospace"; ctx.textAlign = "right";
       ctx.fillText(String(mx), LBL_W - 6, y + 32); ctx.fillText(String(mn), LBL_W - 6, y + rowH - 8); ctx.textAlign = "left";
       ctx.strokeStyle = "#ffd35c"; ctx.lineWidth = 1.5; ctx.beginPath();
-      if (dense) {
-        const npx = Math.ceil(PW) + 1, lo = new Float64Array(npx).fill(Infinity), hi = new Float64Array(npx).fill(-Infinity);
-        for (let i = i0; i <= i1; i++) { const s = ss[i], v = getVal(s, t), p = Math.floor(seqToX(s.seq) - x0); if (p < 0 || p >= npx) continue; if (v < lo[p]) lo[p] = v; if (v > hi[p]) hi[p] = v; }
-        let first = true;
-        for (let p = 0; p < npx; p++) { if (lo[p] === Infinity) continue; const x = x0 + p; if (first) { ctx.moveTo(x, yOf(lo[p])); first = false; } ctx.lineTo(x, yOf(hi[p])); ctx.lineTo(x, yOf(lo[p])); }
-      } else {
-        let first = true;
-        for (let i = i0; i <= i1; i++) { const s = ss[i], x = seqToX(s.seq), yy = yOf(getVal(s, t)); if (x < x0) continue; first ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); first = false; }
-      }
+      let first = true;
+      for (let p = 0; p < npx; p++) { if (lo[p] === Infinity) continue; const x = x0 + p; if (first) { ctx.moveTo(x, yOf(lo[p])); first = false; } ctx.lineTo(x, yOf(hi[p])); ctx.lineTo(x, yOf(lo[p])); }
       ctx.stroke();
     }
     ctx.lineWidth = 1;
     y += rowH;
   }
-  // カーソル線
   if (curSeq != null) {
     const x = seqToX(curSeq);
     ctx.strokeStyle = "#ff8c42"; ctx.beginPath(); ctx.moveTo(x, AXIS_H - 4); ctx.lineTo(x, H); ctx.stroke();
-    const s = ss[findSeq(curSeq)];
-    const t = $("wave-tip"); t.classList.remove("hidden");
-    t.textContent = `${fmtTime(s.wall)}  (-${((nowSeq - curSeq) * cyc).toFixed(2)}s)\n` + tip.join("\n");
+    const sm = ss[findSeq(curSeq)];
+    const tp = $("wave-tip"); tp.classList.remove("hidden");
+    tp.textContent = `${fmtTime(sm.wall)}  (-${((nowSeq - curSeq) * cyc).toFixed(2)}s)\n` + tip.join("\n");
   } else $("wave-tip").classList.add("hidden");
   if (state.paused) { ctx.fillStyle = "#f5b22b"; ctx.font = "bold 12px system-ui"; ctx.fillText("⏸ 停止中", x0 + 6, 4); }
+  ctx.fillStyle = "#3a4452"; ctx.font = "9px ui-monospace"; ctx.textAlign = "right"; ctx.fillText(mode === "exact" ? "" : mode === "mip" ? `${mip.K * state.cfg.cycle_ms}ms 集約` : "px 集約", W - 4, 2); ctx.textAlign = "left";
 }
 function findSeq(seq) {
   const ss = state.samples; let lo = 0, hi = ss.length - 1;
@@ -1056,6 +1110,7 @@ function diagText() {
   const mem = performance.memory ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} MB` : "n/a";
   return [
     `時刻: ${new Date().toLocaleString()}   経過 ${el.toFixed(0)} 秒`,
+    `版: 画面 ${document.documentElement.dataset.version} build ${document.documentElement.dataset.build}  URL ${location.href}`,
     `設定: ${state.cfg ? state.cfg.title : "-"}  周期 ${state.cfg ? state.cfg.cycle_ms : "-"}ms  タグ ${state.tags.length} (表示 ${state.tags.length - state.hidden.size})  波形ch ${state.wave.length}  窓 ${state.winSec}s`,
     `受信: ${(diag.frames / el).toFixed(1)} frame/s  ${(diag.samples / el).toFixed(0)} sample/s  ${(diag.bytes / el / 1024).toFixed(0)} KB/s  イベント ${(diag.events / el).toFixed(1)}/s`,
     `処理: 受信1回あたり 平均 ${procEma.toFixed(1)}ms 最大 ${procMax.toFixed(0)}ms   描画1回 ${drawEma.toFixed(1)}ms   50ms超タスク ${diag.longTasks} 回 / 計 ${diag.longMs.toFixed(0)}ms`,
@@ -1074,7 +1129,7 @@ $("sel-win").onchange = (e) => { state.winSec = parseFloat(e.target.value); stat
 $("b-release").onclick = () => send({type: "release_all"});
 $("b-simreset").onclick = () => send({type: "sim_reset"});
 $("b-simtoggle").onclick = () => send({type: "sim_enable", value: !(state.stat && state.stat.sim_enabled)});
-$("b-wave-clear").onclick = () => { state.wave = []; saveWave(); updateDevices(); };
+$("b-wave-clear").onclick = () => { state.wave = []; mip.ch.clear(); saveWave(); updateDevices(); state.dirty = true; };
 $("b-ev-clear").onclick = () => { state.events = []; evQueue.length = 0; evBox().innerHTML = ""; $("h-ev").textContent = "0"; };
 $("ev-words").onchange = (e) => { state.evWords = e.target.checked; };
 $("ev-filter").oninput = () => { evBox().innerHTML = ""; evQueue.length = 0; evQueue.push(...state.events); flushEvents(); };

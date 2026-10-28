@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import multiprocessing as mp
@@ -27,6 +28,8 @@ class TwinApp:
         self.server = WebServer(host, port, WEB_DIR)
         self.server.on_ws_connect = self._on_connect
         self.server.on_ws_message = self._on_message
+        self.server.route("GET", "/")(self._api_index)
+        self.server.route("GET", "/index.html")(self._api_index)
         self.server.route("GET", "/api/config")(self._api_config)
         self.server.route("GET", "/api/record.csv")(self._api_record_csv)
         self.server.route("GET", "/api/stat")(self._api_stat)
@@ -107,7 +110,9 @@ class TwinApp:
     # --- WebSocket ------------------------------------------------------
     async def _on_connect(self, client: WSClient) -> None:
         print(f"[info] ブラウザ接続 {client.peer}", flush=True)
-        hello = {"type": "hello", "config": self.cfg.to_public(), "server_time": time.time()}
+        from .. import __version__
+        hello = {"type": "hello", "config": self.cfg.to_public(), "server_time": time.time(),
+                 "build": self.app_build(), "version": __version__}
         await client.send_text(json.dumps(hello, ensure_ascii=False))
         # 接続直後に履歴 (波形用) をまとめて送る (監視ワードが多いときはサイズで打ち切り: 約 2MB まで)
         per_sample = 6 * (self.cfg.out.words + self.cfg.inp.words + self.cfg.watch_words) + 60
@@ -198,6 +203,25 @@ class TwinApp:
             await self.server.broadcast(json.dumps(frame, separators=(",", ":")))
 
     # --- REST -----------------------------------------------------------
+    @staticmethod
+    def app_build() -> str:
+        """画面コード (app.js / index.html / style.css) のハッシュ。サーバ更新後に古いページを検出するため。"""
+        h = hashlib.sha1()
+        for name in ("app.js", "index.html", "style.css"):
+            try:
+                with open(os.path.join(WEB_DIR, name), "rb") as f:
+                    h.update(f.read())
+            except OSError:
+                pass
+        return h.hexdigest()[:10]
+
+    async def _api_index(self, req: Request):
+        with open(os.path.join(WEB_DIR, "index.html"), "rb") as f:
+            html = f.read().decode("utf-8")
+        from .. import __version__
+        html = html.replace("__BUILD__", self.app_build()).replace("__VERSION__", __version__)
+        return 200, "text/html; charset=utf-8", html.encode("utf-8")
+
     async def _api_config(self, req: Request):
         return 200, "application/json; charset=utf-8", json.dumps(self.cfg.to_public(), ensure_ascii=False).encode()
 
@@ -309,7 +333,9 @@ class TwinApp:
     async def run(self) -> None:
         self.start_loop()
         await self.server.start()
-        print(f"[info] http://localhost:{self.port}/  (WebSocket {self.fps:g}fps, 周期 {self.cfg.cycle_ms}ms)", flush=True)
+        from .. import __version__
+        print(f"[info] http://localhost:{self.port}/  (WebSocket {self.fps:g}fps, 周期 {self.cfg.cycle_ms}ms)  "
+              f"version {__version__} build {self.app_build()}  起動フォルダ {os.getcwd()}", flush=True)
         task = asyncio.create_task(self._broadcast_task())
         try:
             while True:
