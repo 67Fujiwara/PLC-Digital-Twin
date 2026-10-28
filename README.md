@@ -14,9 +14,12 @@ PLC の本番プログラムをそのまま動かし、PC が 10ms 周期で仮�
 ```
 
 対応 PLC: キーエンス KV-8000 / KV-7000 / KV-Nano（上位リンク 8501）、三菱 MELSEC iQ-R（SLMP 3E バイナリ）。
-依存は Python 3.8 以上と PyYAML だけ。ブラウザ側はビルド不要。
+必要なのは Python 3.8 以上だけ（PyYAML は同梱、pip 不要）。ブラウザ側はビルド不要。
 
 ## 起動
+
+Python をインストールしてフォルダで次を打つだけ。pip install は要らない（PyYAML の純 Python 版を `twin/_vendor` に同梱）。
+Python 3.15 など新しすぎる版で `pip install pyyaml` がコンパイルエラーになる PC でも動く。
 
 ```bash
 pip install -r requirements.txt

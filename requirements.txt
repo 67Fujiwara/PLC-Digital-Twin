@@ -1,1 +1,4 @@
-PyYAML>=6.0
+# 必須ライブラリはありません (PyYAML は twin/_vendor に同梱)。
+# 入っていれば C 拡張版の PyYAML が優先して使われます。テスト用:
+# pytest>=7
+# pytest-timeout
