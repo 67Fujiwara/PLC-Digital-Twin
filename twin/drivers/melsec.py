@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import struct
 
-from .base import NetDriver, DriverError
+from .base import NetDriver, DriverError, ProtocolError
 
 DEVICE_CODES = {
     "SM": 0x91, "SD": 0xA9, "X": 0x9C, "Y": 0x9D, "M": 0x90, "L": 0x92, "F": 0x93,
@@ -93,10 +93,10 @@ class MelsecSLMP(NetDriver):
     def parse_data(data: bytes, n: int) -> list[int]:
         end = struct.unpack("<H", data[:2])[0]
         if end != 0:
-            raise DriverError(f"melsec: 終了コード 0x{end:04X} {END_CODES.get(end, '')}")
+            raise ProtocolError(f"melsec: 終了コード 0x{end:04X} {END_CODES.get(end, '')}")
         payload = data[2:]
         if len(payload) != n * 2:
-            raise DriverError(f"melsec: 応答長不一致 期待{n * 2} 実際{len(payload)}")
+            raise ProtocolError(f"melsec: 応答長不一致 期待{n * 2} 実際{len(payload)}")
         return list(struct.unpack(f"<{n}H", payload))
 
     # --- 通信 ---------------------------------------------------------------
@@ -107,10 +107,13 @@ class MelsecSLMP(NetDriver):
         return self._recv_exact(length)
 
     def read_words(self, dev: str, addr: int, n: int) -> list[int]:
-        return self.parse_data(self._transact(self.build_read(dev, addr, n)), n)
+        try:
+            return self.parse_data(self._transact(self.build_read(dev, addr, n)), n)
+        except ProtocolError as e:
+            raise ProtocolError(f"{e} (読出し {dev}{addr} x{n})") from None
 
     def write_words(self, dev: str, addr: int, values: list[int]) -> None:
         data = self._transact(self.build_write(dev, addr, values))
         end = struct.unpack("<H", data[:2])[0]
         if end != 0:
-            raise DriverError(f"melsec: 書込み終了コード 0x{end:04X} {END_CODES.get(end, '')}")
+            raise ProtocolError(f"melsec: 書込み終了コード 0x{end:04X} {END_CODES.get(end, '')} (書込み {dev}{addr} x{len(values)})")

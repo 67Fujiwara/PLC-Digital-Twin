@@ -89,6 +89,7 @@ class WatchSpec:
     bits: bool = False    # ビットデバイスか (表示をビット展開)
     names: list[str] = field(default_factory=list)
     source: str = ""      # "import" = CSV 取込 (.tags.yaml) 由来
+    error: str = ""       # 読めなかったときの理由 (実行時に付く。空なら正常)
 
 
 @dataclass

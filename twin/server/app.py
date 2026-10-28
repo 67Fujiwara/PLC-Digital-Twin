@@ -81,6 +81,12 @@ class TwinApp:
                         self.ring = deque(self.ring, maxlen=maxlen)
                     self.ring.append(c)
                     self.latest = msg
+            elif msg.get("type") == "watch_error":
+                with self.lock:
+                    i = msg["index"]
+                    if 0 <= i < len(self.cfg.watch):
+                        self.cfg.watch[i].error = msg["msg"]
+                        self._hello_dirty = True
             elif msg.get("type") == "scan_progress":
                 with self.lock:
                     self.scan_status = msg["status"]
@@ -168,6 +174,10 @@ class TwinApp:
                 logs = [l for l in self.logs if l["t"] > last_log]
             if not latest:
                 continue
+            if getattr(self, "_hello_dirty", False):
+                self._hello_dirty = False
+                await self.server.broadcast(json.dumps({"type": "hello", "config": self.cfg.to_public(),
+                                                        "server_time": time.time()}, ensure_ascii=False))
             if new:
                 last_seq = new[-1]["seq"]
             if logs:

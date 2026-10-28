@@ -118,7 +118,7 @@ function setup(cfg) {
     ? `${cfg.watch.length} エントリ / ${cfg.watch_words} ワード`
     : (cfg.watch.map(w => `${w.dev}${w.addr}×${w.words}w`).join(", ") || "なし");
   $("p-watch").classList.toggle("hidden", !cfg.watch.length);
-  state.watchEntries = cfg.watch.map(w => ({dev: w.dev, addr: w.addr, words: w.words, names: w.names, bits: w.bits, source: w.source}));
+  state.watchEntries = cfg.watch.map(w => ({dev: w.dev, addr: w.addr, words: w.words, names: w.names, bits: w.bits, source: w.source, error: w.error}));
   loadHidden();
   buildDevices();
   buildRaw();
@@ -174,8 +174,9 @@ $("vis-none").onclick = () => { for (const t of state.tags) state.hidden.add(tag
 function buildWatchList() {
   const box = $("watch-list"); box.innerHTML = "";
   state.watchEntries.forEach((w, i) => {
-    const d = el("span", "we", `${w.dev}${w.addr} ×${w.words}${w.bits ? " (bit)" : ""}${w.source === "import" ? " 📄" : ""}`);
+    const d = el("span", "we" + (w.error ? " bad" : ""), `${w.dev}${w.addr} ×${w.words}${w.bits ? " (bit)" : ""}${w.source === "import" ? " 📄" : ""}${w.error ? " ⚠" : ""}`);
     if (w.source === "import") d.title = "CSV 取込由来 (.tags.yaml)";
+    if (w.error) d.title = "読めないため無効化: " + w.error + "\n(この PLC に無い範囲。✕ で外すか、範囲を直して追加し直す)";
     const x = el("span", "x", "✕"); x.title = "削除";
     x.onclick = () => { state.watchEntries.splice(i, 1); sendWatch(false); };
     d.appendChild(x); box.appendChild(d);
@@ -549,7 +550,7 @@ let fpsLast = performance.now(), fpsCount = 0;
 function updateHeader(m) {
   const st = m.stat || {};
   const ok = st.status === "connected" && m.loop_alive;
-  $("led").className = "led " + (ok ? "ok" : "");
+  $("led").className = "led " + (ok ? "ok" : st.status === "config_error" ? "warn" : "");
   $("status").textContent = ok ? (st.sim_enabled ? "" : "Sim 停止中") : (st.error || st.status || "");
   const fx = (v, d, w) => (v ?? 0).toFixed(d).padStart(w, " ");
   $("s-period").textContent = fx(st.period_ms, 2, 5);

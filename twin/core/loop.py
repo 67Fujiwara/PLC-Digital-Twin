@@ -22,7 +22,7 @@ import time
 import traceback
 
 from ..config import TwinConfig, parse_config, Ref
-from ..drivers import make_driver, DriverError
+from ..drivers import make_driver, DriverError, ProtocolError
 from ..sim import World, IOBus
 from ..scanner import Scanner
 from .timing import raise_priority, sleep_until, JitterStats
@@ -108,7 +108,7 @@ class LoopState:
             self.start_scan(str(cmd.get("mode", "full")))
         elif t == "set_watch":
             raw = dict(self.cfg.raw)
-            raw["watch"] = list(cmd.get("watch") or [])
+            raw["watch"] = [{k: v for k, v in dict(w).items() if k != "error"} for w in (cmd.get("watch") or [])]
             cfg = parse_config(raw)
             self.cfg = cfg
             self.watch = [0] * cfg.watch_words
@@ -293,10 +293,29 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
             st.out[:] = vals
             if st.cfg.watch and cycle % st.cfg.watch_every == 0:
                 # 監視デバイスは 1 周期に 1 エントリずつ順番に読む (多数登録しても周期を崩さない)
-                w = st.cfg.watch[st.watch_idx % len(st.cfg.watch)]
-                st.watch_idx += 1
-                v = drv.read_words(w.dev, w.addr, w.words)
-                st.watch[w.offset:w.offset + w.words] = v
+                live = [i for i, w in enumerate(st.cfg.watch) if not w.error]
+                if live:
+                    i = live[st.watch_idx % len(live)]
+                    w = st.cfg.watch[i]
+                    st.watch_idx += 1
+                    try:
+                        v = drv.read_words(w.dev, w.addr, w.words)
+                        st.watch[w.offset:w.offset + w.words] = v
+                    except ProtocolError as e:
+                        # その CPU に無い範囲など: このエントリだけ無効化して続行 (接続は維持)
+                        w.error = str(e)
+                        snap_conn.send({"type": "watch_error", "index": i, "msg": str(e)})
+                        snap_conn.send({"type": "log", "level": "error",
+                                        "msg": f"監視デバイス {w.dev}{w.addr} x{w.words} を無効化: {e}"})
+        except ProtocolError as e:
+            # 本体ブロック (out) が読めない = 設定ミス。接続は保ったまま 1 秒ごとに再試行
+            st.status, st.error = "config_error", str(e)
+            if cycle % 100 == 0:
+                snap_conn.send({"type": "log", "level": "error", "msg": f"PLC→PC ブロック読出し失敗 (plc.out を確認): {e}"})
+            st.seq += 1
+            if cycle % 10 == 0:
+                snap_conn.send(_snapshot(st, now, actual_ms, read_ms, write_ms, step_ms, jit, drv))
+            continue
         except DriverError as e:
             st.status, st.error = "disconnected", str(e)
             drv.close()
@@ -329,8 +348,17 @@ def run_loop(raw_cfg: dict, cmd_q: mp.Queue, snap_conn, stop_event) -> None:
                 drv.write_words(cfg.inp.dev, cfg.inp.addr, st.inp)
             while st.pending_writes:
                 dev, addr, vals = st.pending_writes.pop(0)
-                drv.write_words(dev, addr, vals)
-                snap_conn.send({"type": "log", "msg": f"書込み {dev}{addr} <- {vals}"})
+                try:
+                    drv.write_words(dev, addr, vals)
+                    snap_conn.send({"type": "log", "msg": f"書込み {dev}{addr} <- {vals}"})
+                except ProtocolError as e:
+                    snap_conn.send({"type": "log", "level": "error", "msg": f"書込み失敗 {dev}{addr}: {e}"})
+        except ProtocolError as e:
+            st.status, st.error = "config_error", str(e)
+            if cycle % 100 == 0:
+                snap_conn.send({"type": "log", "level": "error", "msg": f"PC→PLC ブロック書込み失敗 (plc.in を確認): {e}"})
+            st.seq += 1
+            continue
         except DriverError as e:
             st.status, st.error = "disconnected", str(e)
             drv.close()

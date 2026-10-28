@@ -93,6 +93,7 @@ table.words td.val, table.words td.hex { font-variant-numeric: tabular-nums; }
 .wlist { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 .wlist .we { font-family: var(--mono); font-size: 11px; background: var(--panel2); border: 1px solid var(--line);
   border-radius: 10px; padding: 1px 8px; display: flex; gap: 6px; align-items: center; }
+.wlist .we.bad { border-color: var(--err); color: var(--err); }
 .wlist .we .x { color: var(--dim); cursor: pointer; } .wlist .we .x:hover { color: var(--err); }
 #watch-add { width: 190px; padding: 1px 5px; font-size: 11px; font-family: var(--mono); }
 #modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 20; display: flex; align-items: center; justify-content: center; }

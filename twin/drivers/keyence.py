@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from .base import NetDriver, DriverError
+from .base import NetDriver, DriverError, ProtocolError
 
 ERRORS = {
     "E0": "デバイス番号異常",
@@ -57,29 +57,31 @@ class KeyenceHostLink(NetDriver):
         return f"WRS {cls.device_str(dev, addr)}.U {len(values)} {vals}\r".encode("ascii")
 
     @staticmethod
-    def parse_read(resp: bytes, n: int) -> list[int]:
+    def parse_read(resp: bytes, n: int, cmd: str = "") -> list[int]:
         text = resp.decode("ascii", errors="replace").strip()
         if text in ERRORS or (len(text) == 2 and text[0] == "E"):
-            raise DriverError(f"keyence: {text} {ERRORS.get(text, '')}")
+            raise ProtocolError(f"keyence: {text} {ERRORS.get(text, '')} (コマンド: {cmd or 'RDS'})")
         parts = text.split()
         if len(parts) != n:
-            raise DriverError(f"keyence: 応答点数不一致 期待{n} 実際{len(parts)}: {text[:60]!r}")
+            raise ProtocolError(f"keyence: 応答点数不一致 期待{n} 実際{len(parts)}: {text[:60]!r} (コマンド: {cmd})")
         try:
             return [int(p) & 0xFFFF for p in parts]
         except ValueError as e:
-            raise DriverError(f"keyence: 応答解析失敗: {text[:60]!r}") from e
+            raise ProtocolError(f"keyence: 応答解析失敗: {text[:60]!r} (コマンド: {cmd})") from e
 
     @staticmethod
-    def parse_write(resp: bytes) -> None:
+    def parse_write(resp: bytes, cmd: str = "") -> None:
         text = resp.decode("ascii", errors="replace").strip()
         if text != "OK":
-            raise DriverError(f"keyence: 書込み応答 {text!r} {ERRORS.get(text, '')}")
+            raise ProtocolError(f"keyence: 書込み応答 {text!r} {ERRORS.get(text, '')} (コマンド: {cmd[:40] or 'WRS'})")
 
     # --- 通信 ---------------------------------------------------------------
     def read_words(self, dev: str, addr: int, n: int) -> list[int]:
-        self._send(self.build_read(dev, addr, n))
-        return self.parse_read(self._recv_until(b"\r\n"), n)
+        frame = self.build_read(dev, addr, n)
+        self._send(frame)
+        return self.parse_read(self._recv_until(b"\r\n"), n, frame.decode("ascii").strip())
 
     def write_words(self, dev: str, addr: int, values: list[int]) -> None:
-        self._send(self.build_write(dev, addr, values))
-        self.parse_write(self._recv_until(b"\r\n"))
+        frame = self.build_write(dev, addr, values)
+        self._send(frame)
+        self.parse_write(self._recv_until(b"\r\n"), frame.decode("ascii").strip())

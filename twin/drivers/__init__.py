@@ -1,7 +1,7 @@
 """PLCドライバ。plc.type に応じて生成する。"""
 from __future__ import annotations
 
-from .base import Driver, DriverError
+from .base import Driver, DriverError, ProtocolError
 
 
 def make_driver(plc: dict) -> Driver:
@@ -23,4 +23,4 @@ def make_driver(plc: dict) -> Driver:
     raise DriverError(f"未対応の plc.type: {t}")
 
 
-__all__ = ["Driver", "DriverError", "make_driver"]
+__all__ = ["Driver", "DriverError", "ProtocolError", "make_driver"]

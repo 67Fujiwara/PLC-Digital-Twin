@@ -53,3 +53,56 @@ def test_fixed_2ms_cycle():
     snaps, logs = _run(raw, 2.0)
     periods = [x["stat"]["period_ms"] for x in snaps[-300:]]
     assert abs(sum(periods) / len(periods) - 2.0) < 0.3
+
+
+def test_bad_watch_entry_is_disabled_without_disconnect():
+    """E0 (デバイス番号異常) を返す監視エントリだけ無効化し、本体は接続を保つ。"""
+    import socket
+    import threading
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(2)
+    port = srv.getsockname()[1]
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(c,), daemon=True).start()
+
+    def handle(c):
+        buf = b""
+        while True:
+            try:
+                d = c.recv(4096)
+            except OSError:
+                return
+            if not d:
+                return
+            buf += d
+            while b"\r" in buf:
+                line, buf = buf.split(b"\r", 1)
+                p = line.decode().split()
+                if p[0] == "RDS":
+                    dev = p[1].split(".")[0]
+                    if dev.startswith("T"):
+                        c.sendall(b"E0\r\n")
+                    else:
+                        c.sendall((" ".join("7" for _ in range(int(p[2]))) + "\r\n").encode())
+                else:
+                    c.sendall(b"OK\r\n")
+
+    threading.Thread(target=serve, daemon=True).start()
+    raw = {"plc": {"type": "keyence", "ip": "127.0.0.1", "port": port, "out": {"dev": "DM", "addr": 1000, "words": 8},
+                   "in": {"dev": "DM", "addr": 1100, "words": 8}},
+           "cycle_ms": 10, "watch": [{"dev": "DM", "addr": 100, "words": 2}, {"dev": "T", "addr": 0, "words": 2},
+                                     {"dev": "MR", "addr": 100, "words": 1}],
+           "tags": {}, "objects": []}
+    snaps, logs = _run(raw, 1.5)
+    msgs = [l["msg"] for l in logs]
+    assert any("無効化" in m and "T0" in m and "E0" in m for m in msgs), msgs
+    assert sum(1 for m in msgs if m.startswith("PLC接続")) == 1          # 再接続していない
+    s = snaps[-1]
+    assert s["stat"]["status"] == "connected"
+    assert s["out"] == [7] * 8 and s["watch"][0] == 7 and s["watch"][4] == 7   # 他の監視は読めている
+    srv.close()

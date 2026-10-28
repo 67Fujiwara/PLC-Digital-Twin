@@ -4,7 +4,11 @@ import socket
 
 
 class DriverError(Exception):
-    """通信エラー・PLC応答エラー。ループ側で再接続対象。"""
+    """通信エラー (切断・タイムアウト)。ループ側で再接続対象。"""
+
+
+class ProtocolError(DriverError):
+    """PLC が応答したがエラーコード (デバイス番号異常など)。接続は生きているので再接続しない。"""
 
 
 class Driver:
