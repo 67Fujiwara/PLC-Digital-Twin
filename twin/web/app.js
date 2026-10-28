@@ -53,6 +53,23 @@ function hex(v, w = 4) { return (v >>> 0).toString(16).toUpperCase().padStart(w,
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 
 // ---------------------------------------------------------------------------
+// JS エラーを画面に出す (F12 を開かなくても分かるように)。同じエラーは回数だけ数える
+// ---------------------------------------------------------------------------
+const jsErrors = new Map();   // message -> count
+function reportError(msg, where) {
+  const key = `${msg} @ ${where || ""}`;
+  const n = (jsErrors.get(key) || 0) + 1;
+  jsErrors.set(key, n);
+  if (n === 1 || n === 10 || n === 100 || n % 1000 === 0) {
+    addLog({t: Date.now() / 1000, level: "error", msg: `JS エラー${n > 1 ? ` (${n} 回目)` : ""}: ${key}`});
+  }
+  const total = [...jsErrors.values()].reduce((a, b) => a + b, 0);
+  const b = $("s-err"); if (b) { b.textContent = String(total); b.parentElement.classList.remove("hidden"); }
+}
+window.addEventListener("error", (e) => reportError(e.message, `${(e.filename || "").split("/").pop()}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => reportError(String(e.reason && e.reason.message || e.reason), "promise"));
+
+// ---------------------------------------------------------------------------
 // WebSocket
 // ---------------------------------------------------------------------------
 let ws = null, wsRetry = 500, ev_len_hint = 0;
@@ -60,7 +77,7 @@ function connect() {
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
   ws = new WebSocket(url);
   ws.onopen = () => { wsRetry = 500; $("status").textContent = "接続中…"; pingLoop(); };
-  ws.onmessage = (ev) => { ev_len_hint = ev.data.length; onMessage(JSON.parse(ev.data)); };
+  ws.onmessage = (ev) => { ev_len_hint = ev.data.length; try { onMessage(JSON.parse(ev.data)); } catch (e) { reportError(e.message, "onMessage"); console.error(e); } };
   ws.onclose = () => {
     $("led").className = "led"; $("status").textContent = "サーバ切断 - 再接続中";
     setTimeout(connect, wsRetry); wsRetry = Math.min(5000, wsRetry * 1.5);
@@ -1044,6 +1061,7 @@ function diagText() {
     `処理: 受信1回あたり 平均 ${procEma.toFixed(1)}ms 最大 ${procMax.toFixed(0)}ms   描画1回 ${drawEma.toFixed(1)}ms   50ms超タスク ${diag.longTasks} 回 / 計 ${diag.longMs.toFixed(0)}ms`,
     `記録: ${state.samples.length} サンプル   JSヒープ ${mem}   軽量モード ${state.light ? "ON" + (state.lightManual ? " (手動)" : " (自動)") : "OFF"}`,
     `画面: ${window.innerWidth}x${window.innerHeight}  DPR ${window.devicePixelRatio}  波形canvas ${waveCv.width}x${waveCv.height}  CPUコア ${navigator.hardwareConcurrency || "?"}  ${navigator.userAgent.split(") ")[0]})`,
+    `JSエラー: ${[...jsErrors.entries()].map(([k, n]) => `${n}× ${k}`).slice(0, 5).join(" | ") || "なし"}`,
     `PLC: ${state.stat ? `${state.stat.status} 周期 ${state.stat.period_ms}ms 読/計/書 ${state.stat.read_ms}/${state.stat.step_ms}/${state.stat.write_ms}ms ジッタ ${JSON.stringify(state.stat.jitter)}` : "-"}  遅延 ${state.latency.toFixed(0)}ms`,
   ].join("\n");
 }
