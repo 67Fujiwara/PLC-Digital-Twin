@@ -160,8 +160,7 @@ class TwinApp:
         with self.lock:
             self.logs.append({"t": time.time(), "level": "info", "msg": msg})
         print(f"[info] {msg}", flush=True)
-        hello = json.dumps({"type": "hello", "config": self.cfg.to_public(), "server_time": time.time()}, ensure_ascii=False)
-        await self.server.broadcast(hello)
+        await self.server.broadcast(self._hello_json())
 
     async def _broadcast_task(self) -> None:
         interval = 1.0 / self.fps
