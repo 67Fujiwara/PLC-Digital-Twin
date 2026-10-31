@@ -494,6 +494,12 @@ class Camera(Behavior):
     ack: out.X を指定すると、done は ack の立上りまで保持 (ハンドシェイク)。省略時は done_time s (既定 0.1) で自動 OFF
     lane_out: in.wN + lanes: N (+ lane_pitch / lane_y0): 座標の代わりに「レーン n に NG あり」をビットで出す
                 (画像検査装置が SOL 番号ごとの排斥要求を返す方式。bit0 = レーン1。done と同じ期間 ON)
+    pixels: [X, Y] + mm_per_px: 画素数で視野を決める。X = 短手 (幅方向), Y = 流れ方向。fov = Y × mm_per_px
+    x_offset: 画像 X=0 の幅方向位置 mm (複数台を幅方向に並べるとき)。受け持ち外のワークは見ない
+    coord: mm (既定) / px。px なら X = 幅方向画素 (x_offset 基準), Y = 流れ方向画素 (視野の上流端が 0)
+    trigger_offset: 自動トリガ線の位置 (視野中心からの mm。視野下流端なら fov/2)
+    lane_window: レーン出力で報告するのはトリガ線から上流側この距離以内のワークだけ (既定: 視野長。
+                 検査装置が「トリガしたワーク」だけ答える実機に合わせるなら 60 など)
     座標系: X = 撮像瞬間の「ワーク中心 − トリガ線」(下流が正)、Y = コンベヤ片側エッジからワーク中心まで。
     PLC 側は「ワーク位置 = at + X + (エンコーダ差 ÷ pulses_per_mm)」で追従する。
     """
@@ -503,7 +509,16 @@ class Camera(Behavior):
         super().__init__(cfg, d)
         self.conv = str(d["on"])
         self.pos = _f(d, "at", 0.0)
-        self.fov = _f(d, "fov", 300.0)
+        px = d.get("pixels")
+        self.px_x = int(px[0]) if px else 0
+        self.px_y = int(px[1]) if px else 0
+        self.mm_per_px = _f(d, "mm_per_px", 1.0)
+        self.fov = (self.px_y * self.mm_per_px) if px else _f(d, "fov", 300.0)
+        self.x_offset = _f(d, "x_offset", 0.0)
+        self.cover = (self.px_x * self.mm_per_px) if px else None     # 幅方向の受け持ち (None = 全幅)
+        self.coord = str(d.get("coord", "mm"))
+        self.trigger_offset = _f(d, "trigger_offset", 0.0)
+        self.lane_window = _f(d, "lane_window", self.fov)
         self.trigger = self.ref("trigger")
         self.ack = self.ref("ack")
         self.delay = _f(d, "delay", 0.05)
@@ -552,16 +567,26 @@ class Camera(Behavior):
         for i in range((self.lanes + 15) // 16):
             io.set(Ref(self.lane_out.block, "word", self.lane_out.word + i, 0, "u16"), (bits >> (16 * i)) & 0xFFFF)
 
+    def in_cover(self, w: Workpiece) -> bool:
+        return self.cover is None or (self.x_offset <= w.y <= self.x_offset + self.cover)
+
     def capture(self, world: World) -> None:
         conv = world.by_name.get(self.conv)
         lo, hi = self.pos - self.fov / 2, self.pos + self.fov / 2
+        tline = self.pos + self.trigger_offset
         res = []
         for w in world.works_on(self.conv):
             cx = w.pos - w.length / 2
-            if lo <= cx <= hi and not w.reported:
-                w.reported = True
-                if w.ng:
-                    res.append((cx - self.pos, w.y))
+            if not (lo <= cx <= hi) or w.reported or not self.in_cover(w):
+                continue
+            if self.lane_out is not None and not (tline - self.lane_window <= w.pos <= tline + w.length):
+                continue                      # レーン出力: トリガしたワーク付近だけ (追従タイミングを揃える)
+            w.reported = True
+            if w.ng:
+                if self.coord == "px":
+                    res.append(((w.y - self.x_offset) / self.mm_per_px, (cx - lo) / self.mm_per_px, w.y))
+                else:
+                    res.append((cx - self.pos, w.y, w.y))
         enc = int(getattr(conv, "pulses", 0.0)) & 0xFFFF_FFFF
         self.pending.append((self.t + self.delay, res, enc))
         self.captures += 1
@@ -576,13 +601,16 @@ class Camera(Behavior):
                 self.capture(world)
             self.prev_trig = tr
         else:
-            # 自動: ワーク前端がトリガ線を通過した瞬間
+            # 自動: ワーク前端がトリガ線 (視野中心 + trigger_offset) を通過した瞬間
             fired = False
             cur = {}
+            tline = self.pos + self.trigger_offset
             for w in world.works_on(self.conv):
+                if not self.in_cover(w):
+                    continue
                 cur[w.id] = w.pos
                 pf = self._prev_front.get(w.id)
-                if pf is not None and pf < self.pos <= w.pos and not fired:
+                if pf is not None and pf < tline <= w.pos and not fired:
                     self.capture(world)
                     fired = True
             self._prev_front = cur
@@ -594,13 +622,13 @@ class Camera(Behavior):
             io.set(self.enc_ref, enc)
             if self.results is not None:
                 for i in range(self.slots):
-                    x, y = self.last[i] if i < len(self.last) else (0.0, 0.0)
+                    x, y = self.last[i][:2] if i < len(self.last) else (0.0, 0.0)
                     io.set(Ref(self.results.block, "word", self.results.word + 2 * i, 0, "s16"), x / self.x_unit)
                     io.set(Ref(self.results.block, "word", self.results.word + 2 * i + 1, 0, "u16"), y / self.y_unit)
             if self.lane_out is not None and self.lanes > 0:
                 self.lane_bits = 0
-                for x, y in res:               # slots を超えた分もレーン出力には反映
-                    self.lane_bits |= 1 << self.lane_of(y, world)
+                for r in res:                   # slots を超えた分もレーン出力には反映 (r[2] = 幅方向 mm)
+                    self.lane_bits |= 1 << self.lane_of(r[2], world)
                 self._write_lanes(io, self.lane_bits)
             self.done = True
             self.done_until = self.t + self.done_time
@@ -618,9 +646,11 @@ class Camera(Behavior):
 
     def state(self):
         return {"name": self.name, "type": self.type, "conv": self.conv, "at": self.pos, "fov": self.fov,
-                "lanes": self.lanes, "lane_bits": self.lane_bits,
+                "lanes": self.lanes, "lane_bits": self.lane_bits, "x_offset": self.x_offset, "cover": self.cover,
+                "px": [self.px_x, self.px_y] if self.px_x else None, "coord": self.coord,
+                "trigger_at": self.pos + self.trigger_offset,
                 "done": self.done, "flash": self.flash > 0, "captures": self.captures, "queued": len(self.pending),
-                "last": [[round(x, 1), round(y, 1)] for x, y in self.last]}
+                "last": [[round(r[0], 1), round(r[1], 1)] for r in self.last]}
 
 
 class AirBlow(Behavior):
@@ -628,7 +658,8 @@ class AirBlow(Behavior):
     on: コンベヤ名  at: 位置 mm  nozzles: 連数  blow: out.wN (bit0=ノズル1, bit1=ノズル2…) または [out.B1, out.B2, ...]
     pitch: ノズル間隔 mm (省略時はコンベヤ幅を等分)  y0: ノズル1 の Y 中心 (省略時は pitch/2)
     band: 各ノズルが効く Y 幅 (既定 pitch)  reach: X 方向に効く幅 (既定 60)
-    ON のノズルの帯 (Y) × at±reach/2 (X) にかかるワークを排出する。NG なら排出成功、OK なら誤排出として集計。
+    rows: 段数 (1 or 2)。2 なら偶数番ノズルを row_gap mm 下流に置き、1 段目の間 (千鳥) に配置する
+    ON のノズルの帯 (Y) × 段の位置±reach/2 (X) にかかるワークを排出する。NG なら排出成功、OK なら誤排出として集計。
     """
     type = "airblow"
 
@@ -652,6 +683,8 @@ class AirBlow(Behavior):
         self.y0 = d.get("y0")
         self.band = d.get("band")
         self.reach = _f(d, "reach", 60.0)
+        self.rows = 2 if int(d.get("rows", 1)) >= 2 else 1
+        self.row_gap = _f(d, "row_gap", 100.0)
         self.active = [False] * self.n
         self.fired = 0
         self.puff = [0.0] * self.n
@@ -665,6 +698,10 @@ class AirBlow(Behavior):
         pitch = float(self.pitch) if self.pitch is not None else cw / self.n
         y0 = float(self.y0) if self.y0 is not None else pitch / 2
         return [y0 + i * pitch for i in range(self.n)]
+
+    def nozzle_x(self, i: int) -> float:
+        """ノズル i の流れ方向位置。2 段なら奇数番 (i%2==1) が row_gap 下流 = 1 段目の間に千鳥配置。"""
+        return self.pos + (i % self.rows) * self.row_gap
 
     def step(self, dt, io, world):
         if self.blow_word is not None:
@@ -684,7 +721,8 @@ class AirBlow(Behavior):
                 continue
             self.puff[i] = 0.1
             ylo, yhi = ys[i] - band / 2, ys[i] + band / 2
-            xlo, xhi = self.pos - self.reach / 2, self.pos + self.reach / 2
+            nx = self.nozzle_x(i)
+            xlo, xhi = nx - self.reach / 2, nx + self.reach / 2
             for w in list(world.works_on(self.conv)):
                 cx = w.pos - w.length / 2
                 if xlo <= cx <= xhi and (w.y + w.width / 2) > ylo and (w.y - w.width / 2) < yhi:
@@ -694,7 +732,8 @@ class AirBlow(Behavior):
     def state(self):
         return {"name": self.name, "type": self.type, "conv": self.conv, "at": self.pos, "nozzles": self.n,
                 "active": self.active, "puff": [p > 0 for p in self.puff], "fired": self.fired,
-                "reach": self.reach}
+                "reach": self.reach, "rows": self.rows, "row_gap": self.row_gap,
+                "pitch": float(self.pitch) if self.pitch is not None else None, "y0": float(self.y0) if self.y0 is not None else None}
 
 
 REGISTRY: dict[str, type[Behavior]] = {

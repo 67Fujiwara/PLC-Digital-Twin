@@ -142,6 +142,9 @@ class TwinConfig:
             "tags": {b: [t.to_dict() for t in ts] for b, ts in self.tags.items()},
             "objects": self.objects,
             "record_seconds": self.record_seconds,
+            "line": self.raw.get("line"),
+            "line_alloc": self.raw.get("_line_alloc"),
+            "line_derived": self.raw.get("_line_derived"),
         }
 
 
@@ -296,6 +299,34 @@ def _parse_block(d: Any, default_dev: str, default_addr: int) -> BlockSpec:
                      int(d.get("words", 64)))
 
 
+def line_sidecar_path(path: str) -> str:
+    """画面の「ライン設定」の保存先: <設定名>.line.yaml"""
+    base, _ = os.path.splitext(path)
+    return base + ".line.yaml"
+
+
+def apply_line(raw: dict) -> dict:
+    """raw['line'] があれば linegen で objects/tags を生成し、同名の objects/tags を置き換える。"""
+    line = raw.get("line")
+    if not line:
+        return raw
+    from .linegen import generate
+    g = generate(line, int(((raw.get("plc") or {}).get("in") or {}).get("words", 64) or 64))
+    raw.setdefault("tags", {})
+    for b in ("out", "in"):
+        gen_names = {t["name"] for t in g["tags"][b]}
+        raw["tags"][b] = g["tags"][b] + [t for t in (raw["tags"].get(b) or []) if t.get("name") not in gen_names]
+    gen_obj = {o["name"] for o in g["objects"]}
+    raw["objects"] = g["objects"] + [o for o in (raw.get("objects") or []) if o.get("name") not in gen_obj]
+    plc = raw.setdefault("plc", {})
+    plc["logic_params"] = g["params"]
+    if not plc.get("logic"):
+        plc["logic"] = "twin.drivers.line_logic"
+    raw["_line_alloc"] = g["alloc"]
+    raw["_line_derived"] = g["derived"]
+    return raw
+
+
 def sidecar_path(path: str) -> str:
     """画面から編集した監視デバイスの保存先: <設定名>.watch.yaml"""
     base, _ = os.path.splitext(path)
@@ -348,6 +379,13 @@ def load_config(path: str) -> TwinConfig:
             side = yaml.safe_load(f) or {}
         if isinstance(side, dict) and "watch" in side:
             raw["watch"] = list(side["watch"] or [])
+    lp = line_sidecar_path(path)
+    if os.path.isfile(lp):
+        with open(lp, "r", encoding="utf-8") as f:
+            ls = yaml.safe_load(f) or {}
+        if isinstance(ls, dict) and ls.get("line"):
+            raw["line"] = ls["line"]
+    raw = apply_line(raw)
     ts = tags_sidecar_path(path)
     if os.path.isfile(ts):
         with open(ts, "r", encoding="utf-8") as f:
@@ -359,6 +397,14 @@ def load_config(path: str) -> TwinConfig:
             w["source"] = "import"
             raw["watch"].append(w)
     return parse_config(raw)
+
+
+def save_line(path: str, line: dict) -> str:
+    lp = line_sidecar_path(path)
+    with open(lp, "w", encoding="utf-8") as f:
+        f.write("# 画面の「ライン設定」から保存。objects / tags はここから自動生成される (twin/linegen.py)。\n")
+        yaml.safe_dump({"line": line}, f, allow_unicode=True, sort_keys=False)
+    return lp
 
 
 def save_watch(path: str, watch: list) -> str:

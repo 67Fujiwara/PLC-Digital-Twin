@@ -12,7 +12,8 @@ PLC 出力（out / watch）は読むだけ、PLC 入力（in）は書くだけ�
 | `emitter` | `onto`, `at`, `every`, `trigger`, `enable`, `length`, `max`, `initial` | — |
 | `axis` | `target`(s32), `start`, `home`, `jog_fwd`, `jog_rev`, `speed`, `accel`, `decel`, `unit_scale`, `lo`, `hi`, `tol`, `initial` | `pos`(s32), `busy`, `inpos` |
 | `camera` | `on`, `at`(トリガ線), `fov`, `trigger`(省略時はワーク前端通過で自動撮像), `delay`, `slots`, `ack`, `done_time`, `x_unit`, `y_unit` | `done`, `count`, `enc`(撮像時エンコーダ u32), `results`(先頭ワード。NG ごとに X(s16), Y(u16) の 2 ワード) |
-| `airblow` | `on`, `at`, `nozzles`(連数), `blow`(`out.wN` の bit0〜 or ビット参照のリスト), `pitch`, `y0`, `band`, `reach` | — |
+| `airblow` | `on`, `at`, `nozzles`(連数), `blow`(`out.wN` の bit0〜 or ビット参照のリスト), `pitch`, `y0`, `band`, `reach`, `rows`(1/2), `row_gap` | — |
+| `camera` 追加 | `pixels: [X, Y]` + `mm_per_px`（視野を画素で指定）, `x_offset`（幅方向の受け持ち開始）, `coord: px`（画素で出力）, `trigger_offset`, `lane_window` | |
 | `blinker` | `period` | `output`（通信確認用） |
 | `counter` | `step` | `output`（毎周期加算、通信確認用） |
 

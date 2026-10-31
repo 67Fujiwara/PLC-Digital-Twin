@@ -19,7 +19,7 @@ def make_driver(plc: dict) -> Driver:
                           protocol=str(plc.get("protocol", "tcp")))
     if t == "mock":
         from .mock import MockPLC
-        return MockPLC(logic=plc.get("logic"), scan_ms=float(plc.get("scan_ms", 2.0)))
+        return MockPLC(logic=plc.get("logic"), scan_ms=float(plc.get("scan_ms", 2.0)), params=plc.get("logic_params"))
     raise DriverError(f"未対応の plc.type: {t}")
 
 

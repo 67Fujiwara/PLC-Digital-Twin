@@ -1063,7 +1063,7 @@ function drawLine() {
   const maxLen = Math.max(1, ...convs.map(c => c.length));
   const sx = PW / maxLen;                                   // mm -> px (X)
   const beltH = (c) => Math.max(26, Math.min(120, (c.width || 300) * sx));
-  const rowOf = (c) => beltH(c) + 54;
+  const rowOf = (c) => beltH(c) + 54 + Math.max(0, objs.filter(o => o.type === "camera" && o.conv === c.name).length - 1) * 11;
   const total = convs.reduce((a, c) => a + rowOf(c), 0) + (cyls.length + axes.length) * 64 + 16;
   const [ctx, W, H] = resizeCanvas(lineCv, Math.max(90, total));
   ctx.clearRect(0, 0, W, H);
@@ -1074,7 +1074,8 @@ function drawLine() {
   let y = 10;
   for (const c of convs) {
     const bh = beltH(c), sy = bh / (c.width || 300);        // mm -> px (Y)
-    const top = y + 30, yc = top + bh / 2, len = c.length * sx;
+    const ncam = objs.filter(o => o.type === "camera" && o.conv === c.name).length;
+    const top = y + 30 + Math.max(0, ncam - 1) * 11, yc = top + bh / 2, len = c.length * sx;
     const px = (mm) => X0 + mm * sx, py = (mm) => top + mm * sy;
     ctx.fillStyle = "#aab4c3"; ctx.font = "bold 12px system-ui"; ctx.fillText(c.name, 8, yc - 8);
     ctx.fillStyle = "#6b7684"; ctx.font = "10px ui-monospace"; ctx.fillText(`${c.v.toFixed(0)} mm/s${c.next ? " → " + c.next : ""}`, 8, yc + 8);
@@ -1090,35 +1091,43 @@ function drawLine() {
     ctx.fillStyle = "#55606f"; ctx.font = "9px ui-monospace";
     ctx.fillText("0", X0, top + bh + 8); ctx.fillText(`${c.length}`, X0 + len - 22, top + bh + 8);
     ctx.fillText("Y0", X0 - 14, top + 4); ctx.fillText(`${c.width || 300}`, X0 - 22, top + bh - 4);
-    // カメラ視野
+    // カメラ視野 (複数台は幅方向の受け持ち範囲だけ)
+    let camIdx = 0;
     for (const o of objs) {
       if (o.type !== "camera" || o.conv !== c.name) continue;
       const x1 = px(o.at - o.fov / 2), x2 = px(o.at + o.fov / 2);
-      ctx.fillStyle = o.flash ? "rgba(120,220,255,.35)" : "rgba(120,220,255,.08)"; ctx.fillRect(x1, top, x2 - x1, bh);
-      ctx.setLineDash([4, 3]); ctx.strokeStyle = "#78dcff"; ctx.strokeRect(x1 + .5, top + .5, x2 - x1, bh); ctx.setLineDash([]);
-      ctx.strokeStyle = o.done ? "#ffd35c" : "#78dcff"; ctx.beginPath(); ctx.moveTo(px(o.at), top - 6); ctx.lineTo(px(o.at), top + bh + 6); ctx.stroke();
+      const y1 = o.cover != null ? py(o.x_offset) : top, y2 = o.cover != null ? py(o.x_offset + o.cover) : top + bh;
+      ctx.fillStyle = o.flash ? "rgba(120,220,255,.35)" : "rgba(120,220,255,.08)"; ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.setLineDash([4, 3]); ctx.strokeStyle = "#78dcff"; ctx.strokeRect(x1 + .5, y1 + .5, x2 - x1, y2 - y1); ctx.setLineDash([]);
+      const tx = px(o.trigger_at != null ? o.trigger_at : o.at);
+      ctx.strokeStyle = o.done ? "#ffd35c" : "#78dcff"; ctx.beginPath(); ctx.moveTo(tx, y1 - 4); ctx.lineTo(tx, y2 + 4); ctx.stroke();
       ctx.fillStyle = "#78dcff"; ctx.font = "10px system-ui"; ctx.textAlign = "center";
-      ctx.fillText(`📷 ${o.name} (${o.captures})${o.done ? " DONE" : ""}${o.queued ? " +" + o.queued : ""}`, px(o.at), top - 14);
+      ctx.fillText(`📷 ${o.name} (${o.captures})${o.px ? ` ${o.px[0]}×${o.px[1]}px` : ""}${o.done ? " DONE" : ""}${o.queued ? " +" + o.queued : ""}`, (x1 + x2) / 2, top - 14 - camIdx * 11);
       ctx.textAlign = "left";
-      if (o.last && o.last.length) { ctx.fillStyle = "#ffd35c"; ctx.font = "9px ui-monospace"; ctx.fillText(o.last.map(r => `(${r[0]},${r[1]})`).join(" "), x1, top + bh + 20); }
+      if (o.last && o.last.length) { ctx.fillStyle = "#ffd35c"; ctx.font = "9px ui-monospace"; ctx.fillText(o.last.map(r => `(${r[0]},${r[1]})`).join(" ") + (o.coord === "px" ? " px" : ""), x1, y2 - 4 - (camIdx % 2) * 10); }
+      camIdx++;
     }
-    // エアブロー
+    // エアブロー (2 段なら奇数番を row_gap 下流に千鳥)
     for (const o of objs) {
       if (o.type !== "airblow" || o.conv !== c.name) continue;
-      const n = o.nozzles, pitch = (c.width || 300) / n;
+      const n = o.nozzles, pitch = o.pitch || (c.width || 300) / n, y0 = o.y0 != null ? o.y0 : pitch / 2, rows = o.rows || 1, gap = o.row_gap || 0;
       ctx.fillStyle = "#9aa5b5"; ctx.font = "10px system-ui"; ctx.textAlign = "center";
-      ctx.fillText(`${o.name} ×${n} (${o.fired})`, px(o.at), top - 14); ctx.textAlign = "left";
-      ctx.strokeStyle = "#3a4452"; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(px(o.at), top); ctx.lineTo(px(o.at), top + bh); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillText(`${o.name} ×${n}${rows > 1 ? ` ${rows}段` : ""} (${o.fired})`, px(o.at + (rows > 1 ? gap / 2 : 0)), top - 14); ctx.textAlign = "left";
+      ctx.strokeStyle = "#3a4452"; ctx.setLineDash([2, 3]);
+      for (let r = 0; r < rows; r++) { ctx.beginPath(); ctx.moveTo(px(o.at + r * gap), top); ctx.lineTo(px(o.at + r * gap), top + bh); ctx.stroke(); }
+      ctx.setLineDash([]);
+      const small = pitch * sy < 7;
       for (let i = 0; i < n; i++) {
-        const cy = py(pitch * (i + .5));
+        const cy = py(y0 + i * pitch), nx = px(o.at + (i % rows) * gap);
         const on = o.active[i], puff = o.puff[i];
-        ctx.fillStyle = on ? "#ff8c42" : "#55606f";
-        ctx.beginPath(); ctx.moveTo(px(o.at) - 7, cy - 4); ctx.lineTo(px(o.at) + 1, cy); ctx.lineTo(px(o.at) - 7, cy + 4); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = on ? "#ff8c42" : (i % rows ? "#6b7684" : "#55606f");
+        const h = small ? 2 : 4;
+        ctx.beginPath(); ctx.moveTo(nx - 7, cy - h); ctx.lineTo(nx + 1, cy); ctx.lineTo(nx - 7, cy + h); ctx.closePath(); ctx.fill();
         if (on || puff) {
           ctx.fillStyle = on ? "rgba(255,140,66,.45)" : "rgba(255,140,66,.18)";
-          ctx.fillRect(px(o.at - o.reach / 2), py(pitch * i) + 1, o.reach * sx, pitch * sy - 2);
+          ctx.fillRect(px(o.at + (i % rows) * gap - o.reach / 2), py(y0 + i * pitch - pitch / 2) + 1, o.reach * sx, Math.max(1, pitch * sy - 2));
         }
-        ctx.fillStyle = "#55606f"; ctx.font = "8px ui-monospace"; ctx.fillText(String(i + 1), px(o.at) + 3, cy);
+        if (!small) { ctx.fillStyle = "#55606f"; ctx.font = "8px ui-monospace"; ctx.fillText(String(i + 1), nx + 3, cy); }
       }
     }
     // センサ・ストッパ・供給
@@ -1220,6 +1229,52 @@ function raf(ts) {
 // ---------------------------------------------------------------------------
 $("b-pause").onclick = togglePause;
 $("b-light").onclick = () => setLight(!state.light, false);
+
+// ---------------------------------------------------------------------------
+// ライン設定 (カメラ台数・画素・射撃台数・段数・距離・速度) → サーバで objects/tags を生成して即反映
+// ---------------------------------------------------------------------------
+const LN = {
+  "ln-speed": ["conveyor", "speed"], "ln-width": ["conveyor", "width"], "ln-length": ["conveyor", "length"],
+  "ln-cam-count": ["camera", "count"], "ln-px-x": ["camera", "px_x"], "ln-px-y": ["camera", "px_y"], "ln-mpp": ["camera", "mm_per_px"],
+  "ln-cam-at": ["camera", "at"], "ln-cam-delay": ["camera", "delay_ms"], "ln-coord": ["camera", "coord"],
+  "ln-ej-count": ["eject", "count"], "ln-ej-rows": ["eject", "rows"], "ln-ej-gap": ["eject", "row_gap"], "ln-ej-dist": ["eject", "distance"],
+  "ln-ej-band": ["eject", "band"], "ln-ej-reach": ["eject", "reach"], "ln-ej-blow": ["eject", "blow_ms"],
+  "ln-sup-every": ["supply", "every"], "ln-sup-jitter": ["supply", "jitter"], "ln-sup-len": ["supply", "length"], "ln-sup-wid": ["supply", "width"], "ln-sup-ng": ["supply", "ng_rate"],
+};
+function lineFromForm() {
+  const line = {};
+  for (const [id, [sec, key]] of Object.entries(LN)) {
+    const e = $(id); if (!e) continue;
+    const v = e.tagName === "SELECT" ? e.value : parseFloat(e.value);
+    (line[sec] = line[sec] || {})[key] = (e.tagName === "SELECT" && key !== "rows") ? v : Number(v);
+  }
+  return line;
+}
+function lineToForm(line) {
+  for (const [id, [sec, key]] of Object.entries(LN)) { const e = $(id); if (e && line[sec] && line[sec][key] != null) e.value = line[sec][key]; }
+}
+function renderLineDerived(d, alloc) {
+  if (d) $("line-derived").textContent =
+    `視野: Y ${d.fov_mm.toFixed(1)} mm × X ${d.cover_mm.toFixed(1)} mm/台 (計 ${d.cam_coverage_mm.toFixed(1)} mm)   射撃ピッチ ${d.pitch_mm.toFixed(2)} mm   ` +
+    `視野下流端 Y=${d.fov_end.toFixed(0)} → 1 段目 Y=${d.eject_at.toFixed(0)}   搬送時間 1 段目 ${d.travel_ms_row1.toFixed(0)} ms / 2 段目 ${d.travel_ms_row2.toFixed(0)} ms`;
+  const t = $("line-alloc"); t.innerHTML = "<tr><td>方向</td><td>デバイス</td><td>内容</td></tr>";
+  for (const [dirn, dev, what] of (alloc || [])) { const tr = el("tr"); tr.appendChild(el("td", null, dirn === "out" ? "PLC→PC" : "PC→PLC")); tr.appendChild(el("td", "ad", dev)); tr.appendChild(el("td", null, what)); t.appendChild(tr); }
+}
+async function openLine() {
+  const r = await fetch("/api/line"); const j = await r.json();
+  lineToForm(j.line); renderLineDerived(j.derived, j.alloc);
+  $("line-modal").classList.remove("hidden");
+}
+$("b-line").onclick = openLine;
+$("line-close").onclick = () => $("line-modal").classList.add("hidden");
+$("line-modal").onclick = (e) => { if (e.target.id === "line-modal") $("line-modal").classList.add("hidden"); };
+$("line-save").onclick = async () => {
+  const r = await fetch("/api/line", {method: "PUT", body: JSON.stringify({line: lineFromForm()})});
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "保存失敗"); return; }
+  renderLineDerived(j.derived, j.alloc);
+  $("line-modal").classList.add("hidden");
+};
 function diagText() {
   const el = (performance.now() - diag.t0) / 1000;
   const mem = performance.memory ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} MB` : "n/a";

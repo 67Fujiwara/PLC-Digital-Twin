@@ -304,3 +304,44 @@ def test_camera_lane_output():
     assert io.get(Ref("in", "word", 2)) == 0x0001 and io.get(Ref("in", "word", 3)) == 0x8000
     run(world, io, 0.15)                            # done_time 後に OFF (後続ワークの撮像結果は NG 0 なのでレーンは 0)
     assert io.get(Ref("in", "word", 2)) == 0 and io.get(Ref("in", "word", 3)) == 0
+
+
+def test_line_generator_two_cams_two_rows_end_to_end():
+    """ライン設定 (カメラ 2 台, 射撃 32 台 × 2 段) を生成し、疑似ラダーで 120 秒流して NG が排出されること。"""
+    from twin.config import parse_config, apply_line
+    from twin.drivers.mock import MockPLC
+    raw = {"plc": {"type": "mock", "out": {"dev": "DM", "addr": 1000, "words": 64}, "in": {"dev": "DM", "addr": 1100, "words": 64}},
+           "line": {"conveyor": {"speed": 300, "width": 640, "length": 1500},
+                    "camera": {"count": 2, "px_x": 1024, "px_y": 512, "mm_per_px": 0.3125, "at": 400, "delay_ms": 30, "coord": "px"},
+                    "eject": {"count": 32, "rows": 2, "row_gap": 60, "distance": 300, "band": 18, "reach": 30, "blow_ms": 60},
+                    "supply": {"every": 0.5, "jitter": 0.5, "length": 30, "width": 30, "ng_rate": 0.3, "max": 80}},
+           "seed": 5}
+    raw = apply_line(raw)
+    cfg = parse_config(raw)
+    assert [o["name"] for o in cfg.objects][:3] == ["conv", "supply", "PE_IN"]
+    cams = [o for o in cfg.objects if o["type"] == "camera"]
+    assert len(cams) == 2 and cams[1]["x_offset"] == 320.0 and cams[0]["pixels"] == [1024, 512]
+    sol = [o for o in cfg.objects if o["type"] == "airblow"][0]
+    assert sol["rows"] == 2 and sol["at"] == 780.0 and len(sol["blow"]) == 32
+    world = World(cfg)
+    out, inp, watch = [0] * 64, [0] * 64, []
+    io = IOBus(out, inp, watch)
+    plc = MockPLC(logic=cfg.plc["logic"], params=cfg.plc["logic_params"])
+    plc.connect()
+    px_seen = []
+    for i in range(12000):
+        plc.logic.scan(plc.mem, 0.01)
+        out[:] = plc.mem.words("DM", 1000, 64)
+        world.step(0.01, io)
+        plc.mem.set_words("DM", 1100, inp)
+        if inp[20] and (inp[1] & 1):            # CAM1 DONE で NG 座標 (画素) を記録
+            px_seen.append((inp[32], inp[33]))
+    st = world.stats
+    assert st["ng_total"] >= 20
+    assert st["ng_passed"] <= 1, st
+    assert st["ng_ejected"] >= st["ng_total"] - 4, st
+    assert st["ok_ejected"] <= 3, st
+    assert px_seen and all(0 <= x <= 1024 and 0 <= y <= 512 for x, y in px_seen)
+    # 2 段目 (奇数レーン) のノズルは row_gap 下流
+    ab = world.by_name["SOL"]
+    assert ab.nozzle_x(0) == 780.0 and ab.nozzle_x(1) == 840.0 and ab.nozzle_x(2) == 780.0

@@ -56,16 +56,30 @@ class Memory:
 class MockPLC(Driver):
     name = "mock"
 
-    def __init__(self, logic: str | None = None, scan_ms: float = 2.0):
+    def __init__(self, logic: str | None = None, scan_ms: float = 2.0, params: dict | None = None):
         self.mem = Memory()
         self.logic = None
         self.logic_name = logic
+        self.params = params or {}
         self.scan_ms = scan_ms
         self._last = time.perf_counter()
         self._connected = False
+        self.load_logic(logic, self.params)
+
+    def load_logic(self, logic: str | None, params: dict | None = None) -> None:
+        """疑似ラダーを (再) 生成。Logic(params) を受け付けるものには設定を渡す。"""
+        self.logic_name = logic
+        self.params = params or {}
+        self.logic = None
         if logic:
             mod = importlib.import_module(logic)
-            self.logic = mod.Logic() if hasattr(mod, "Logic") else mod
+            if hasattr(mod, "Logic"):
+                try:
+                    self.logic = mod.Logic(self.params)
+                except TypeError:
+                    self.logic = mod.Logic()
+            else:
+                self.logic = mod
 
     def connect(self) -> None:
         self._connected = True

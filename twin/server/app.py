@@ -12,7 +12,8 @@ import threading
 import time
 from collections import deque
 
-from ..config import TwinConfig, parse_config, save_watch, tags_sidecar_path
+from ..config import TwinConfig, parse_config, save_watch, tags_sidecar_path, save_line, load_config as _load_config
+from ..linegen import generate as _line_generate, merged as _line_merged
 from ..groups import load_groups, save_groups
 from ..core.loop import run_loop
 from .http import WebServer, WSClient, Request
@@ -36,6 +37,8 @@ class TwinApp:
         self.server.route("GET", "/api/stat")(self._api_stat)
         self.server.route("POST", "/api/cmd")(self._api_cmd)
         self.server.route("POST", "/api/import")(self._api_import)
+        self.server.route("GET", "/api/line")(self._api_line_get)
+        self.server.route("PUT", "/api/line")(self._api_line_put)
         self.server.route("GET", "/api/groups")(self._api_groups_get)
         self.server.route("PUT", "/api/groups")(self._api_groups_put)
         self.server.route("POST", "/api/scan")(self._api_scan_start)
@@ -113,10 +116,7 @@ class TwinApp:
     # --- WebSocket ------------------------------------------------------
     async def _on_connect(self, client: WSClient) -> None:
         print(f"[info] ブラウザ接続 {client.peer}", flush=True)
-        from .. import __version__
-        hello = {"type": "hello", "config": self.cfg.to_public(), "server_time": time.time(),
-                 "build": self.app_build(), "version": __version__, "groups": self._groups()}
-        await client.send_text(json.dumps(hello, ensure_ascii=False))
+        await client.send_text(self._hello_json())
         # 接続直後に履歴 (波形用) をまとめて送る (監視ワードが多いときはサイズで打ち切り: 約 2MB まで)
         per_sample = 6 * (self.cfg.out.words + self.cfg.inp.words + self.cfg.watch_words) + 60
         n_hist = max(100, min(3000, 2_000_000 // per_sample))
@@ -184,8 +184,7 @@ class TwinApp:
                 continue
             if getattr(self, "_hello_dirty", False):
                 self._hello_dirty = False
-                await self.server.broadcast(json.dumps({"type": "hello", "config": self.cfg.to_public(),
-                                                        "server_time": time.time(), "groups": self._groups()}, ensure_ascii=False))
+                await self.server.broadcast(self._hello_json())
             if new:
                 last_seq = new[-1]["seq"]
             if logs:
@@ -236,6 +235,41 @@ class TwinApp:
     async def _api_cmd(self, req: Request):
         self.send_cmd(req.json())
         return 200, "application/json", b'{"ok":true}'
+
+    async def _api_line_get(self, req: Request):
+        line = _line_merged(self.cfg.raw.get("line"))
+        g = _line_generate(line)
+        return 200, "application/json; charset=utf-8", json.dumps(
+            {"line": line, "alloc": g["alloc"], "derived": g["derived"], "active": bool(self.cfg.raw.get("line"))}, ensure_ascii=False).encode()
+
+    async def _api_line_put(self, req: Request):
+        """ライン設定を保存して objects/tags を作り直し、ループに再読込させる。"""
+        if not self.config_path:
+            return 400, "application/json; charset=utf-8", json.dumps({"error": "設定パスなし"}, ensure_ascii=False).encode()
+        body = req.json() or {}
+        line = _line_merged(body.get("line") or {})
+        try:
+            _line_generate(line)
+            save_line(self.config_path, line)
+            new_cfg = _load_config(self.config_path)
+        except Exception as e:  # noqa: BLE001
+            return 400, "application/json; charset=utf-8", json.dumps({"error": f"ライン設定エラー: {e}"}, ensure_ascii=False).encode()
+        self.cfg = new_cfg
+        self.send_cmd({"type": "reload", "raw": new_cfg.raw})
+        with self.lock:
+            self.ring.clear()
+        msg = f"ライン設定を保存: カメラ {line['camera']['count']} 台, 射撃 {line['eject']['count']} 台 × {line['eject']['rows']} 段, 速度 {line['conveyor']['speed']} mm/s"
+        with self.lock:
+            self.logs.append({"t": time.time(), "level": "info", "msg": msg})
+        print(f"[info] {msg}", flush=True)
+        await self.server.broadcast(self._hello_json())
+        g = _line_generate(line)
+        return 200, "application/json; charset=utf-8", json.dumps({"ok": True, "alloc": g["alloc"], "derived": g["derived"]}, ensure_ascii=False).encode()
+
+    def _hello_json(self) -> str:
+        from .. import __version__
+        return json.dumps({"type": "hello", "config": self.cfg.to_public(), "server_time": time.time(),
+                           "build": self.app_build(), "version": __version__, "groups": self._groups()}, ensure_ascii=False)
 
     def _groups(self) -> list:
         try:
@@ -325,9 +359,7 @@ class TwinApp:
         with self.lock:
             self.logs.append({"t": time.time(), "level": "info", "msg": msg})
         print(f"[info] {msg}", flush=True)
-        hello = json.dumps({"type": "hello", "config": self.cfg.to_public(), "server_time": time.time(),
-                            "groups": self._groups()}, ensure_ascii=False)
-        await self.server.broadcast(hello)
+        await self.server.broadcast(self._hello_json())
         return 200, "application/json; charset=utf-8", json.dumps(
             {"ok": True, "out": len(res.tags["out"]), "in": len(res.tags["in"]), "watch": len(res.watch),
              "words": sum(w["words"] for w in res.watch), "skipped": res.skipped[:40], "saved": ts}, ensure_ascii=False).encode()

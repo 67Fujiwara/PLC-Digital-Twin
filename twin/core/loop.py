@@ -107,6 +107,19 @@ class LoopState:
             self.world.works.clear()
         elif t == "scan":
             self.start_scan(str(cmd.get("mode", "full")))
+        elif t == "reload":
+            raw = dict(cmd["raw"])
+            cfg = parse_config(raw)
+            self.cfg = cfg
+            self.watch = [0] * cfg.watch_words
+            self.inp_sim = [0] * cfg.inp.words
+            self.inp = [0] * cfg.inp.words
+            self.io = IOBus(self.out, self.inp_sim, self.watch)
+            self.io_plc = IOBus(self.out, self.inp, self.watch)
+            self.world = World(cfg)
+            if self.drv is not None and hasattr(self.drv, "load_logic"):
+                self.drv.load_logic(cfg.plc.get("logic"), cfg.plc.get("logic_params"))
+            self.snap_conn.send({"type": "log", "msg": f"設定を再読込: objects {len(cfg.objects)}, tags out {len(cfg.tags['out'])} in {len(cfg.tags['in'])}"})
         elif t == "set_watch":
             raw = dict(self.cfg.raw)
             raw["watch"] = [{k: v for k, v in dict(w).items() if k != "error"} for w in (cmd.get("watch") or [])]

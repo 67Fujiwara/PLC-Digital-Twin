@@ -172,3 +172,11 @@ table.words tr.b-out td.ad { color: #6fa8e0; } table.words tr.b-in td.ad { color
 .legend { font-size: 11px; margin: 2px 0 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .lg-out { color: #6fa8e0; } .lg-in { color: #6fc27a; } .lg-watch { color: #c8b46a; }
 .grp.drop { outline: 1px dashed var(--accent); }
+#line-modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 20; display: flex; align-items: center; justify-content: center; }
+.lform { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; overflow: auto; }
+.lform fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin: 0; min-width: 0; }
+.lform legend { color: #aab4c3; font-size: 12px; padding: 0 4px; }
+.lform label { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--fg); font-size: 12px; margin: 3px 0; }
+.lform input, .lform select { width: 110px; padding: 2px 6px; font-family: var(--mono); text-align: right; }
+#line-derived { margin: 8px 0 4px; font-family: var(--mono); font-size: 11px; white-space: pre-wrap; }
+#line-alloc td { font-size: 11px; }

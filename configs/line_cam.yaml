@@ -1,0 +1,18 @@
+# 画像検査 + 多連射撃ライン (ライン設定から自動生成)。
+#   python -m twin configs/line_cam.yaml --mock     # PC だけ (疑似ラダー twin/drivers/line_logic.py)
+#   python -m twin configs/line_cam.yaml            # 実機 (ip を書き換え、I/O 割付は画面の「ライン設定」→ 割付表)
+# 画面の「ライン設定」で保存すると configs/line_cam.line.yaml に書かれ、こちらの line: より優先される。
+title: Camera Line (KV)
+plc:
+  type: keyence
+  ip: 192.168.0.10
+  port: 8501
+  out: {dev: DM, addr: 1000, words: 64}   # PLC -> PC: CONV_RUN, SOL01〜
+  in:  {dev: DM, addr: 1100, words: 64}   # PC -> PLC: カメラ結果 (DONE / REQ レーン / NG 画素座標), エンコーダ
+cycle_ms: 10
+record_seconds: 120
+line:
+  conveyor: {speed: 300, width: 640, length: 1500}
+  camera:   {count: 2, px_x: 1024, px_y: 512, mm_per_px: 0.3125, at: 400, delay_ms: 30, coord: px}
+  eject:    {count: 32, rows: 2, row_gap: 60, distance: 300, band: 18, reach: 30, blow_ms: 60}
+  supply:   {every: 0.6, jitter: 0.6, length: 30, width: 30, ng_rate: 0.3, max: 60}
