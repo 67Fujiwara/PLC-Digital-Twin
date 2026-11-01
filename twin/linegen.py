@@ -22,7 +22,8 @@ import math
 DEFAULT_LINE = {
     "conveyor": {"speed": 300.0, "width": 640.0, "length": 1500.0},
     "camera": {"count": 1, "px_x": 2048, "px_y": 1024, "mm_per_px": 0.3125, "at": 400.0, "delay_ms": 30, "coord": "px"},
-    "eject": {"count": 32, "rows": 1, "row_gap": 60.0, "distance": 300.0, "band": 18.0, "reach": 30.0, "blow_ms": 60, "lead": 15.0},
+    "eject": {"count": 32, "rows": 1, "row_gap": 60.0, "distance": 300.0, "band": 18.0, "reach": 30.0, "blow_ms": 60, "lead": 15.0,
+              "pitch": 0.0, "x0": -1.0},   # pitch 0 = ベルト幅 ÷ 台数, x0 < 0 = pitch/2 (ベルト端から半ピッチ)
     "supply": {"every": 0.6, "jitter": 0.6, "length": 30.0, "width": 30.0, "ng_rate": 0.3, "max": 60},
 }
 
@@ -47,7 +48,9 @@ def generate(line: dict | None, words: int = 64) -> dict:
     fov_end = cam_at + fov / 2
     n = max(1, int(ej["count"])); rows = 2 if int(ej["rows"]) >= 2 else 1
     row_gap = float(ej["row_gap"]); dist = float(ej["distance"])
-    pitch = width / n
+    pitch = float(ej.get("pitch") or 0) or width / n                  # 射撃ピッチ (0 ならベルト幅を等分)
+    x0 = float(ej.get("x0", -1))
+    x0 = x0 if x0 >= 0 else pitch / 2                                  # 1 台目の X 位置 (ベルト端基準)
     eject_at = fov_end + dist                         # 1 段目
     tags_out = [{"name": "CONV_RUN", "bit": "0.0", "comment": "搬送コンベヤ運転"}]
     tags_in = [{"name": "ENC", "word": 4, "type": "u32", "comment": "搬送エンコーダ (10 pls/mm)"},
@@ -87,9 +90,10 @@ def generate(line: dict | None, words: int = 64) -> dict:
                         "x_offset": x_off, "coord": str(cam["coord"]), "trigger_offset": fov / 2,
                         "lane_window": float(sup["length"]) * 1.5, "delay": float(cam["delay_ms"]) / 1000.0,
                         "done_time": 0.05, "slots": 4, "done": f"in.{nm}_DONE", "count": f"in.{nm}_COUNT",
-                        "results": f"in.w{32 + 8 * i}", "lanes": n, "lane_pitch": pitch, "lane_out": f"in.{nm}_REQ1"})
+                        "results": f"in.w{32 + 8 * i}", "lanes": n, "lane_pitch": pitch, "lane_y0": x0 - pitch / 2,
+                        "lane_out": f"in.{nm}_REQ1"})
         cams.append(nm)
-    objects.append({"name": "SOL", "type": "airblow", "on": "conv", "at": eject_at, "nozzles": n, "pitch": pitch,
+    objects.append({"name": "SOL", "type": "airblow", "on": "conv", "at": eject_at, "nozzles": n, "pitch": pitch, "y0": x0,
                     "band": float(ej["band"]), "reach": float(ej["reach"]), "rows": rows, "row_gap": row_gap,
                     "blow": sol_refs})
     params = {"speed": speed, "ppm": 10.0, "lanes": n, "rows": rows, "row_gap": row_gap,
@@ -98,6 +102,7 @@ def generate(line: dict | None, words: int = 64) -> dict:
               "cams": ncam, "req_words": [10 + 2 * i for i in range(ncam)], "done_bits": [(1, i) for i in range(ncam)],
               "enc_word": 4, "sol_word": 2, "run_bit": (0, 0)}
     return {"objects": objects, "tags": {"out": tags_out, "in": tags_in}, "params": params, "alloc": alloc,
-            "derived": {"fov_mm": fov, "cover_mm": cover, "pitch_mm": pitch, "eject_at": eject_at, "fov_end": fov_end,
+            "derived": {"fov_mm": fov, "cover_mm": cover, "pitch_mm": pitch, "eject_x0": x0, "eject_span": x0 + (n - 1) * pitch,
+                        "belt_width": width, "eject_at": eject_at, "fov_end": fov_end,
                         "cam_coverage_mm": cover * ncam, "travel_ms_row1": dist / speed * 1000 if speed else 0,
                         "travel_ms_row2": (dist + row_gap) / speed * 1000 if speed else 0}}

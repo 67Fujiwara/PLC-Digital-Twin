@@ -111,7 +111,7 @@
     <div id="line-form" class="lform">
       <fieldset><legend>コンベヤ</legend>
         <label>速度 (mm/s) <input id="ln-speed" type="number" step="1"></label>
-        <label>幅 X (mm) <input id="ln-width" type="number" step="1"></label>
+        <label>ベルト幅 X (mm) <input id="ln-width" type="number" step="1"></label>
         <label>長さ Y (mm) <input id="ln-length" type="number" step="1"></label>
       </fieldset>
       <fieldset><legend>カメラ</legend>
@@ -127,6 +127,8 @@
         <label>台数 <input id="ln-ej-count" type="number" min="1" max="64"></label>
         <label>段数 <select id="ln-ej-rows"><option value="1">1 段</option><option value="2">2 段 (千鳥: 2 段目は 1 段目の間)</option></select></label>
         <label>段間距離 (mm, 2 段のとき) <input id="ln-ej-gap" type="number" step="1"></label>
+        <label>ピッチ X (mm, 0 = ベルト幅÷台数) <input id="ln-ej-pitch" type="number" step="0.1" min="0"></label>
+        <label>1 台目の X 位置 (mm, -1 = 半ピッチ) <input id="ln-ej-x0" type="number" step="0.1" min="-1"></label>
         <label>視野の下流端 → 1 段目までの距離 (mm) <input id="ln-ej-dist" type="number" step="1"></label>
         <label>1 台の有効幅 X (mm) <input id="ln-ej-band" type="number" step="1"></label>
         <label>到達幅 Y (mm) <input id="ln-ej-reach" type="number" step="1"></label>

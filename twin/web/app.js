@@ -1238,7 +1238,7 @@ const LN = {
   "ln-cam-count": ["camera", "count"], "ln-px-x": ["camera", "px_x"], "ln-px-y": ["camera", "px_y"], "ln-mpp": ["camera", "mm_per_px"],
   "ln-cam-at": ["camera", "at"], "ln-cam-delay": ["camera", "delay_ms"], "ln-coord": ["camera", "coord"],
   "ln-ej-count": ["eject", "count"], "ln-ej-rows": ["eject", "rows"], "ln-ej-gap": ["eject", "row_gap"], "ln-ej-dist": ["eject", "distance"],
-  "ln-ej-band": ["eject", "band"], "ln-ej-reach": ["eject", "reach"], "ln-ej-blow": ["eject", "blow_ms"],
+  "ln-ej-pitch": ["eject", "pitch"], "ln-ej-x0": ["eject", "x0"], "ln-ej-band": ["eject", "band"], "ln-ej-reach": ["eject", "reach"], "ln-ej-blow": ["eject", "blow_ms"],
   "ln-sup-every": ["supply", "every"], "ln-sup-jitter": ["supply", "jitter"], "ln-sup-len": ["supply", "length"], "ln-sup-wid": ["supply", "width"], "ln-sup-ng": ["supply", "ng_rate"],
 };
 function lineFromForm() {
@@ -1255,7 +1255,7 @@ function lineToForm(line) {
 }
 function renderLineDerived(d, alloc) {
   if (d) $("line-derived").textContent =
-    `視野: Y ${d.fov_mm.toFixed(1)} mm × X ${d.cover_mm.toFixed(1)} mm/台 (計 ${d.cam_coverage_mm.toFixed(1)} mm)   射撃ピッチ ${d.pitch_mm.toFixed(2)} mm   ` +
+    `ベルト幅 ${d.belt_width} mm   視野: Y ${d.fov_mm.toFixed(1)} mm × X ${d.cover_mm.toFixed(1)} mm/台 (計 ${d.cam_coverage_mm.toFixed(1)} mm)   射撃: ピッチ ${d.pitch_mm.toFixed(2)} mm, X ${d.eject_x0.toFixed(1)}〜${d.eject_span.toFixed(1)} mm   ` +
     `視野下流端 Y=${d.fov_end.toFixed(0)} → 1 段目 Y=${d.eject_at.toFixed(0)}   搬送時間 1 段目 ${d.travel_ms_row1.toFixed(0)} ms / 2 段目 ${d.travel_ms_row2.toFixed(0)} ms`;
   const t = $("line-alloc"); t.innerHTML = "<tr><td>方向</td><td>デバイス</td><td>内容</td></tr>";
   for (const [dirn, dev, what] of (alloc || [])) { const tr = el("tr"); tr.appendChild(el("td", null, dirn === "out" ? "PLC→PC" : "PC→PLC")); tr.appendChild(el("td", "ad", dev)); tr.appendChild(el("td", null, what)); t.appendChild(tr); }
